@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.database import init_db, get_db_info
-from app.routers import dashboard, screening, stocks, exclusions, export, backtest, settings as settings_router
+from app.routers import dashboard, screening, stocks, exclusions, export, backtest, settings as settings_router, universe as universe_router
 
 
 @asynccontextmanager
@@ -54,6 +54,7 @@ app.include_router(exclusions.router)
 app.include_router(export.router)
 app.include_router(backtest.router)
 app.include_router(settings_router.router)
+app.include_router(universe_router.router)
 
 
 @app.get("/")

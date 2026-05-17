@@ -5,12 +5,17 @@ from typing import Dict, List, Optional, Any
 import threading
 
 from app.services.universe import get_universe
-from app.services.price_fetcher import get_stock_data, get_stock_info, get_usd_jpy, set_sample_mode
+from app.services.price_fetcher import (
+    get_stock_data, get_stock_info, get_usd_jpy, set_sample_mode,
+    get_stock_quote_with_freshness, is_sample_mode,
+)
 from app.services.analyzer import (
     calc_indicators, judge_volume_cycle, judge_chart_cycle,
     classify_archetype, calc_score, build_warning_flags, generate_ai_comment
 )
+from app.services.freshness import assess_freshness
 from app.db_repo import save_screening_run
+from app.services import universe_db
 
 
 _screening_progress: Dict[str, Any] = {
@@ -64,6 +69,8 @@ def _run_screening(params: Dict):
         min_vol_us = params.get("min_vol_us", 100000)
         min_score = params.get("min_score", 0)
         max_symbols = params.get("max_symbols", 0)  # 0 = 制限なし
+        use_db_universe = params.get("use_db_universe", True)
+        enforce_freshness_gate = params.get("enforce_freshness_gate", True)
 
         # サンプルモード切り替え
         set_sample_mode(not use_real)
@@ -71,9 +78,24 @@ def _run_screening(params: Dict):
         fx_rate = get_usd_jpy()
         fx_timestamp = datetime.now().isoformat()
 
-        universe = get_universe(markets, include_adr, use_real)
-        if max_symbols > 0:
-            universe = universe[:max_symbols]
+        # ユニバース取得: DB優先(eligible only)、空ならフォールバック
+        universe = []
+        if use_db_universe:
+            db_items = universe_db.list_eligible_yahoo_symbols(
+                markets=markets, max_count=max_symbols, include_adr=include_adr
+            )
+            for it in db_items:
+                universe.append({
+                    "symbol": it["yahoo_symbol"],
+                    "name": it["name"],
+                    "market": it["market"],
+                    "exchange": "",
+                    "is_adr": it.get("is_adr", False),
+                })
+        if not universe:
+            universe = get_universe(markets, include_adr, use_real)
+            if max_symbols > 0:
+                universe = universe[:max_symbols]
 
         with _lock:
             _screening_progress["total"] = len(universe)
@@ -112,13 +134,33 @@ def _run_screening(params: Dict):
                     "symbol": symbol,
                     "name": stock.get("name", symbol),
                     "market": market,
-                    "exclude_reason": "データ取得失敗",
+                    "exclude_reason": "データ取得失敗 (price_fetch_failed)",
+                    "freshness_status": "price_fetch_failed",
                     "price": None,
                     "volume": None,
                     "date": today,
                 })
                 with _lock:
                     _screening_progress["failed"] += 1
+                continue
+
+            # 鮮度ゲート: 価格対象日が当該市場の最新営業日かチェック
+            last_quote_date = str(df["date"].iloc[-1]) if "date" in df.columns else None
+            fresh = assess_freshness(market=market, quote_date=last_quote_date, quote_timestamp=None, data_source="yfinance")
+
+            if enforce_freshness_gate and fresh.get("is_stale") and not is_sample_mode():
+                exclusions.append({
+                    "symbol": symbol,
+                    "name": stock.get("name", symbol),
+                    "market": market,
+                    "exclude_reason": f"価格データが古い ({fresh.get('stale_reason')})",
+                    "freshness_status": fresh.get("freshness_status"),
+                    "stale_reason": fresh.get("stale_reason"),
+                    "quote_date": last_quote_date,
+                    "price": float(df["close"].iloc[-1]) if "close" in df.columns else None,
+                    "volume": float(df["volume"].iloc[-1]) if "volume" in df.columns else None,
+                    "date": today,
+                })
                 continue
 
             current_price = float(df["close"].iloc[-1])
@@ -231,6 +273,11 @@ def _run_screening(params: Dict):
                 "fx_rate": round(rate, 4),
                 "fx_rate_timestamp": fx_timestamp,
                 "price_timestamp": datetime.now().isoformat(),
+                "quote_date": last_quote_date,
+                "freshness_status": fresh.get("freshness_status"),
+                "fetched_at_jst": fresh.get("fetched_at_jst"),
+                "is_realtime_or_delayed": fresh.get("is_realtime_or_delayed"),
+                "data_source": "sample" if is_sample_mode() else "yfinance",
                 "volume": current_vol,
                 "volume_avg20": round(float(vol_avg20), 0),
                 "volume_ratio": indicators.get("volume_ratio", 1.0),

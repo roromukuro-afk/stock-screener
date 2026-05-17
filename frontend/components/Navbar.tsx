@@ -4,6 +4,7 @@ import { usePathname } from "next/navigation";
 
 const navItems = [
   { href: "/", label: "ダッシュボード" },
+  { href: "/universe", label: "ユニバース管理" },
   { href: "/screening", label: "全銘柄スクリーニング" },
   { href: "/ranking", label: "候補ランキング" },
   { href: "/excluded", label: "除外銘柄" },

@@ -16,6 +16,9 @@ class ScreeningParams(BaseModel):
     min_vol_us: float = 100000
     min_score: float = 0
     excluded_symbols: List[str] = []
+    max_symbols: int = 0           # 0 = 制限なし。Render Free対策で本番では小さく
+    use_db_universe: bool = True   # DBの普通株+ADRのみ対象
+    enforce_freshness_gate: bool = True  # 古い価格データを除外
 
 
 @router.post("/run")

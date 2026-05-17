@@ -66,6 +66,25 @@ export const api = {
   runBacktest: (symbols?: string[]) =>
     fetchAPI("/api/backtest/run", { method: "POST", body: JSON.stringify({ symbols }) }),
   backtestResults: () => fetchAPI("/api/backtest/results"),
+  // universe
+  universeSummary: () => fetchAPI("/api/universe/summary"),
+  universeUpdate: () => fetchAPI("/api/universe/update", { method: "POST", body: "{}" }),
+  universeUpdateJpx: () => fetchAPI("/api/universe/update/jpx", { method: "POST", body: "{}" }),
+  universeUpdateNasdaq: () => fetchAPI("/api/universe/update/nasdaq", { method: "POST", body: "{}" }),
+  universeUpdateOther: () => fetchAPI("/api/universe/update/other-listed", { method: "POST", body: "{}" }),
+  universeProgress: () => fetchAPI("/api/universe/update/progress"),
+  universeList: (params?: { eligible_only?: boolean; market?: string; limit?: number; offset?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.eligible_only) qs.set("eligible_only", "true");
+    if (params?.market) qs.set("market", params.market);
+    if (params?.limit) qs.set("limit", String(params.limit));
+    if (params?.offset) qs.set("offset", String(params.offset));
+    return fetchAPI(`/api/universe/list?${qs}`);
+  },
+  universeRefreshPrices: (params: { markets?: string[]; include_adr?: boolean; max_symbols?: number }) =>
+    fetchAPI("/api/universe/refresh-prices", { method: "POST", body: JSON.stringify(params) }),
+  universeRefreshProgress: () => fetchAPI("/api/universe/refresh-progress"),
+  universeStalePrices: (limit = 500) => fetchAPI(`/api/universe/stale-prices?limit=${limit}`),
   // settings
   settings: () => fetchAPI("/api/settings"),
   saveSetting: (key: string, value: string) =>

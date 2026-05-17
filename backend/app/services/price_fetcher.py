@@ -111,6 +111,100 @@ def _fetch_from_yahoo_api(symbol: str, period: str = "3mo") -> Optional[pd.DataF
         return None
 
 
+def _fetch_quote_meta_from_yahoo(symbol: str) -> Dict:
+    """Yahoo Finance API から最新クォートのメタ情報を取得"""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    params = {"interval": "1d", "range": "5d"}
+    try:
+        r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        if r.status_code != 200:
+            return {}
+        data = r.json()
+        result = (data.get("chart") or {}).get("result") or []
+        if not result:
+            return {}
+        chart = result[0]
+        meta = chart.get("meta", {}) or {}
+        return {
+            "regularMarketPrice": meta.get("regularMarketPrice"),
+            "regularMarketTime": meta.get("regularMarketTime"),  # epoch
+            "previousClose": meta.get("previousClose"),
+            "marketState": meta.get("marketState"),
+            "exchangeTimezoneName": meta.get("exchangeTimezoneName"),
+            "currency": meta.get("currency"),
+            "instrumentType": meta.get("instrumentType"),
+        }
+    except Exception:
+        return {}
+
+
+def get_stock_quote_with_freshness(symbol: str, market: str = None) -> Dict:
+    """価格 + 鮮度情報を返す。
+    Returns: {price, quote_date, quote_timestamp, freshness_status, is_stale, stale_reason, ...}
+    """
+    from app.services.freshness import assess_freshness
+    if market is None:
+        market = "JP" if ".T" in symbol else "US"
+
+    if is_sample_mode():
+        # サンプルモード: 当日扱い
+        df = generate_sample_price_data(symbol, market=market)
+        if df is None or df.empty:
+            return {
+                "price": None,
+                "quote_date": None,
+                "quote_timestamp": None,
+                **assess_freshness(market, None, None, "sample"),
+                "data_source": "sample",
+            }
+        last = df.iloc[-1]
+        return {
+            "price": float(last["close"]),
+            "quote_date": str(last["date"]),
+            "quote_timestamp": None,
+            **assess_freshness(market, str(last["date"]), None, "sample"),
+            "data_source": "sample",
+        }
+
+    # 実データ: meta + history で照合
+    meta = _fetch_quote_meta_from_yahoo(symbol)
+    df = _fetch_from_yahoo_api(symbol, period="5d")
+
+    price = None
+    quote_date = None
+    quote_ts = None
+
+    if meta.get("regularMarketPrice"):
+        price = float(meta["regularMarketPrice"])
+    if meta.get("regularMarketTime"):
+        quote_ts = float(meta["regularMarketTime"])
+        try:
+            quote_date = datetime.fromtimestamp(quote_ts).date().isoformat()
+        except Exception:
+            quote_date = None
+
+    # historyの最終日とprice/dateを照合・補完
+    if df is not None and len(df) >= 1:
+        last_row = df.iloc[-1]
+        last_date = str(last_row.get("date"))
+        last_close = float(last_row.get("close"))
+        if not quote_date:
+            quote_date = last_date
+        if price is None:
+            price = last_close
+        # quote_dateとhistoryの最終日がズレる場合はhistoryを優先(より保守的)
+        if quote_date and last_date and quote_date < last_date:
+            quote_date = last_date
+
+    return {
+        "price": price,
+        "quote_date": quote_date,
+        "quote_timestamp": quote_ts,
+        **assess_freshness(market, quote_date, quote_ts, "yfinance"),
+        "data_source": "yfinance",
+    }
+
+
 def get_stock_data(symbol: str, period: str = "3mo", market: str = None) -> Optional[pd.DataFrame]:
     """株価データを取得。サンプルモードまたはyfinance失敗時は合成データを返す。"""
     if is_sample_mode():

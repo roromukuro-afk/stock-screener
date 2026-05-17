@@ -6,6 +6,7 @@ yfinance
 pandas
 numpy
 openpyxl
+xlrd>=2.0.1
 requests
 python-dotenv
 pydantic

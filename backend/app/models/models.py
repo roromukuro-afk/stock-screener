@@ -138,6 +138,93 @@ class ExclusionList(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class UniverseSymbol(Base):
+    __tablename__ = "universe_symbols"
+    id = Column(Integer, primary_key=True, index=True)
+    raw_symbol = Column(String, index=True)
+    symbol = Column(String, unique=True, index=True, nullable=False)
+    yahoo_symbol = Column(String, index=True)
+    name = Column(String)
+    market = Column(String, index=True)
+    exchange = Column(String)
+    source = Column(String)
+    country = Column(String)
+    currency = Column(String)
+    instrument_type = Column(String, index=True)  # common_stock / adr / etf / warrant / unit / right / preferred / fund / etn / note / bond / test_issue / spac / unknown
+    is_common_stock = Column(Boolean, default=False)
+    is_adr = Column(Boolean, default=False)
+    is_etf = Column(Boolean, default=False)
+    is_warrant = Column(Boolean, default=False)
+    is_unit = Column(Boolean, default=False)
+    is_right = Column(Boolean, default=False)
+    is_preferred = Column(Boolean, default=False)
+    is_spac = Column(Boolean, default=False)
+    is_fund = Column(Boolean, default=False)
+    is_test_issue = Column(Boolean, default=False)
+    is_screening_eligible = Column(Boolean, default=False, index=True)
+    exclusion_reason = Column(String)
+    duplicate_key = Column(String, index=True)
+    first_seen_at = Column(DateTime, server_default=func.now())
+    last_seen_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    last_updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class PriceFreshness(Base):
+    __tablename__ = "price_freshness"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True, nullable=False)
+    yahoo_symbol = Column(String, index=True)
+    market = Column(String)
+    data_source = Column(String)
+    price = Column(Float)
+    currency = Column(String)
+    jpy_price = Column(Float)
+    quote_date = Column(String, index=True)
+    quote_time = Column(String)
+    latest_trading_day = Column(String)
+    fetched_at_utc = Column(String)
+    fetched_at_jst = Column(String)
+    exchange_timezone = Column(String)
+    is_market_open_at_fetch = Column(Boolean)
+    delay_minutes_estimated = Column(Float)
+    is_realtime_or_delayed = Column(String)  # realtime / delayed / close / unknown
+    freshness_status = Column(String, index=True)
+    is_stale = Column(Boolean, default=False, index=True)
+    stale_reason = Column(String)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class UniverseUpdateJob(Base):
+    __tablename__ = "universe_update_jobs"
+    id = Column(Integer, primary_key=True, index=True)
+    status = Column(String, index=True)
+    source = Column(String)
+    total_raw_count = Column(Integer, default=0)
+    normalized_count = Column(Integer, default=0)
+    eligible_count = Column(Integer, default=0)
+    excluded_count = Column(Integer, default=0)
+    stale_price_count = Column(Integer, default=0)
+    fresh_price_count = Column(Integer, default=0)
+    failed_price_count = Column(Integer, default=0)
+    error_message = Column(Text)
+    started_at = Column(DateTime, server_default=func.now())
+    finished_at = Column(DateTime)
+
+
+class UniverseSourceFile(Base):
+    __tablename__ = "universe_source_files"
+    id = Column(Integer, primary_key=True, index=True)
+    source = Column(String, index=True)
+    source_url = Column(Text)
+    file_name = Column(String)
+    row_count = Column(Integer, default=0)
+    fetched_at = Column(DateTime, server_default=func.now())
+    checksum = Column(String)
+    file_creation_time = Column(String)
+    status = Column(String)
+    error_message = Column(Text)
+
+
 class AppSetting(Base):
     __tablename__ = "app_settings"
     id = Column(Integer, primary_key=True, index=True)
