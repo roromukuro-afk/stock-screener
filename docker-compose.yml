@@ -1,0 +1,47 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: screener-backend
+    environment:
+      APP_ENV: local
+      DATABASE_URL: postgresql://screener:screener@db:5432/screener
+      ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      DEFAULT_USDJPY: "155"
+      PYTHONUTF8: "1"
+    depends_on:
+      - db
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: screener-frontend
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+      NEXT_PUBLIC_APP_ENV: local
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+
+  db:
+    image: postgres:16-alpine
+    container_name: screener-db
+    environment:
+      POSTGRES_USER: screener
+      POSTGRES_PASSWORD: screener
+      POSTGRES_DB: screener
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

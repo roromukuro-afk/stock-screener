@@ -1,0 +1,90 @@
+# ===== Python / FastAPI =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+.eggs/
+backend/venv/
+backend/env/
+backend/.venv/
+backend/.Python
+backend/*.log
+backend/backend_out.log
+backend/backend_err.log
+
+# ===== Node / Next.js =====
+node_modules/
+.next/
+out/
+.turbo/
+.swc/
+.vercel/
+
+# ===== Frontend logs =====
+frontend/frontend_out.log
+frontend/frontend_err.log
+frontend/.next/
+frontend/node_modules/
+
+# ===== Build outputs =====
+dist/
+build/
+*.tsbuildinfo
+next-env.d.ts
+
+# ===== Environment / Secrets =====
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+backend/.env
+frontend/.env.local
+frontend/.env.production
+
+# ===== Database =====
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+backend/screener.db
+backend/*.db
+backend/*.db-*
+
+# ===== Logs =====
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===== Tests / Coverage =====
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ===== Misc =====
+*.bak
+*.tmp
+test_export.csv
+test_export.xlsx

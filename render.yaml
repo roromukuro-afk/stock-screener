@@ -1,0 +1,45 @@
+# Render Blueprint - Web Service (FastAPI) + PostgreSQL を一括デプロイ
+# 使い方:
+#   1. https://render.com で New + → Blueprint
+#   2. GitHubリポジトリを連携
+#   3. このファイルが自動検出される → Apply
+#   4. 完了後、Web Service の ALLOWED_ORIGINS を Vercel公開URLに書き換える
+
+services:
+  - type: web
+    name: stock-screener-backend
+    runtime: python
+    rootDir: backend
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt && pip install psycopg2-binary
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: stock-screener-db
+          property: connectionString
+      - key: ALLOWED_ORIGINS
+        value: "*"  # 公開後 Vercel URL (例: https://stock-screener.vercel.app) に書き換え推奨
+      - key: ALLOWED_ORIGIN_REGEX
+        value: https://.*\.vercel\.app
+      - key: YFINANCE_ENABLED
+        value: "true"
+      - key: SAMPLE_MODE
+        value: "false"
+      - key: DEFAULT_USDJPY
+        value: "155"
+      - key: PYTHONUTF8
+        value: "1"
+      - key: PYTHONIOENCODING
+        value: "utf-8"
+
+databases:
+  - name: stock-screener-db
+    plan: free
+    databaseName: screener
+    user: screener
+    region: singapore
