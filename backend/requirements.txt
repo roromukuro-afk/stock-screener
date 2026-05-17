@@ -1,19 +1,14 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-python-multipart==0.0.9
-sqlalchemy==2.0.35
-aiosqlite==0.20.0
-yfinance==0.2.43
-pandas==2.2.3
-numpy==2.1.1
-openpyxl==3.1.5
-requests==2.32.3
-python-dotenv==1.0.1
-pydantic==2.9.2
-pydantic-settings==2.5.2
-httpx==0.27.2
-ta==0.11.0
-scipy==1.14.1
-# 本番でPostgreSQL接続が必要な場合は psycopg2-binary を追加でインストール
-# pip install psycopg2-binary
-
+fastapi
+uvicorn[standard]
+python-multipart
+sqlalchemy
+yfinance
+pandas
+numpy
+openpyxl
+requests
+python-dotenv
+pydantic
+pydantic-settings
+httpx
+psycopg2-binary
