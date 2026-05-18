@@ -432,9 +432,11 @@ def _run_screening(params: Dict):
         # ===== AAR予測ラベル付与 =====
         try:
             from app.services import aar_db
-            from app.services.predictor import match_against_library
+            from app.services.predictor import match_against_library, _match_training_library
+            from app.services.training_builder import get_training_features_for_matching
 
             library = aar_db.get_feature_vectors_for_matching(limit=2000)
+            tlibrary = get_training_features_for_matching(limit=2000).get("items", [])
             for r in results:
                 # 銘柄ごとに現在の特徴量(=結果の中の数値)から類似マッチング
                 current = {
@@ -477,6 +479,24 @@ def _run_screening(params: Dict):
                 r["matched_past_cases"] = pred.get("matched_cases", [])
                 r["reason_summary"] = pred.get("reason_summary")
                 r["avoid_condition"] = _build_avoid_condition(r, pred)
+                # training_feature_vector との類似度マッチ
+                if tlibrary:
+                    try:
+                        hist = _match_training_library(current, tlibrary, top_k=5)
+                        r["historical_positive_similarity"] = hist.get("historical_positive_similarity")
+                        r["historical_negative_similarity"] = hist.get("historical_negative_similarity")
+                        r["overextended_failure_similarity"] = hist.get("overextended_failure_similarity")
+                        r["weak_material_failure_similarity"] = hist.get("weak_material_failure_similarity")
+                        r["material_exhaustion_failure_similarity"] = hist.get("material_exhaustion_failure_similarity")
+                        r["bad_news_failure_similarity"] = hist.get("bad_news_failure_similarity")
+                        r["failure_similarity_type"] = hist.get("failure_similarity_type")
+                        r["similar_historical_cases"] = hist.get("similar_historical_cases", [])
+                        r["training_based_score_adjustment"] = hist.get("training_based_score_adjustment", 0)
+                        # final_prediction_scoreを training adjustment で補正
+                        adj = hist.get("training_based_score_adjustment") or 0
+                        r["final_prediction_score"] = max(0, min(100, (r.get("final_prediction_score") or 0) + adj))
+                    except Exception as e:
+                        print(f"training match per-result failed: {e}")
         except Exception as e:
             print(f"prediction integration failed: {e}")
 

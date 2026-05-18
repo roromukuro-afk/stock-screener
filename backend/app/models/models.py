@@ -388,6 +388,171 @@ class PatternLibrary(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class HistoricalOHLCV(Base):
+    __tablename__ = "historical_ohlcv"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True, nullable=False)
+    yahoo_symbol = Column(String, index=True)
+    market = Column(String, index=True)
+    date = Column(String, index=True, nullable=False)
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    adjusted_close = Column(Float)
+    volume = Column(Float)
+    turnover = Column(Float)
+    data_source = Column(String)
+    fetched_at = Column(DateTime, server_default=func.now())
+    is_adjusted = Column(Boolean, default=True)
+    corporate_action_flag = Column(Boolean, default=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class SurgeEvent(Base):
+    __tablename__ = "surge_events"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True, nullable=False)
+    yahoo_symbol = Column(String)
+    name = Column(String)
+    market = Column(String, index=True)
+    event_date = Column(String, index=True, nullable=False)
+    move_percent = Column(Float)
+    threshold_type = Column(String, index=True)  # surge_20 / semi_surge_15
+    close_t_minus_1 = Column(Float)
+    close_t0 = Column(Float)
+    volume_t0 = Column(Float)
+    volume_ratio_t0 = Column(Float)
+    detected_at = Column(DateTime, server_default=func.now())
+    source = Column(String)
+    is_valid = Column(Boolean, default=True)
+    validation_warning = Column(Text)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class TrainingWindow(Base):
+    __tablename__ = "training_windows"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)
+    market = Column(String)
+    event_date = Column(String, index=True)
+    case_type = Column(String, index=True)
+    # positive_surge / semi_positive_surge / negative_non_surge /
+    # failed_overextended / failed_weak_material / failed_bad_news /
+    # failed_material_exhaustion / watch_event
+    window_start = Column(String)
+    window_end = Column(String)
+    t1_date = Column(String)
+    t0_date = Column(String)
+    max_gain_20d = Column(Float)
+    max_drawdown_20d = Column(Float)
+    hit_20_percent = Column(Boolean, default=False)
+    hit_10_percent = Column(Boolean, default=False)
+    stop_loss_like_drawdown = Column(Float)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class TrainingFeatureVector(Base):
+    __tablename__ = "training_feature_vectors"
+    id = Column(Integer, primary_key=True, index=True)
+    training_window_id = Column(Integer, index=True)
+    symbol = Column(String, index=True)
+    market = Column(String)
+    feature_asof_date = Column(String, index=True)
+    case_type = Column(String, index=True)
+    # 価格・出来高
+    close = Column(Float)
+    volume = Column(Float)
+    price_change_1d = Column(Float)
+    price_change_3d = Column(Float)
+    price_change_5d = Column(Float)
+    price_change_20d = Column(Float)
+    volume_ratio_5d = Column(Float)
+    volume_ratio_20d = Column(Float)
+    # MA
+    ma5 = Column(Float)
+    ma25 = Column(Float)
+    ma75 = Column(Float)
+    ma200 = Column(Float)
+    ma25_deviation = Column(Float)
+    support_line = Column(Float)
+    resistance_line = Column(Float)
+    resistance_upside = Column(Float)
+    support_distance = Column(Float)
+    atr = Column(Float)
+    range_position = Column(Float)
+    # candle
+    candle_state = Column(String)
+    high_close_flag = Column(Boolean, default=False)
+    low_close_flag = Column(Boolean, default=False)
+    upper_shadow_ratio = Column(Float)
+    lower_shadow_ratio = Column(Float)
+    # 前夜サイン
+    range_break_flag = Column(Boolean, default=False)
+    squeeze_flag = Column(Boolean, default=False)
+    prior_big_volume_flag = Column(Boolean, default=False)
+    selling_exhaustion_flag = Column(Boolean, default=False)
+    reaccumulation_flag = Column(Boolean, default=False)
+    pre_breakout_flag = Column(Boolean, default=False)
+    # スコア
+    overextension_score = Column(Float)
+    chart_volume_score = Column(Float)
+    liquidity_score = Column(Float)
+    risk_control_score = Column(Float)
+    # 材料
+    material_known_flag = Column(Boolean, default=False)
+    catalyst_category = Column(String)
+    catalyst_quality_score = Column(Float)
+    catalyst_continuity_score = Column(Float)
+    bad_news_flag = Column(Boolean, default=False)
+    dilution_risk_flag = Column(Boolean, default=False)
+    # ラベル
+    label_hit_20_percent = Column(Boolean, default=False)
+    label_max_gain_20d = Column(Float)
+    label_max_drawdown_20d = Column(Float)
+    label_success_class = Column(String, index=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class TrainingBuildJob(Base):
+    __tablename__ = "training_build_jobs"
+    id = Column(Integer, primary_key=True, index=True)
+    status = Column(String, index=True)
+    job_type = Column(String)
+    market_scope = Column(String)
+    start_date = Column(String)
+    end_date = Column(String)
+    total_symbols = Column(Integer, default=0)
+    processed_symbols = Column(Integer, default=0)
+    fetched_rows = Column(Integer, default=0)
+    surge_events_found = Column(Integer, default=0)
+    negative_cases_found = Column(Integer, default=0)
+    feature_vectors_created = Column(Integer, default=0)
+    error_count = Column(Integer, default=0)
+    error_message = Column(Text)
+    started_at = Column(DateTime, server_default=func.now())
+    finished_at = Column(DateTime)
+
+
+class TrainingDataQualityReport(Base):
+    __tablename__ = "training_data_quality_reports"
+    id = Column(Integer, primary_key=True, index=True)
+    report_date = Column(String)
+    total_feature_vectors = Column(Integer, default=0)
+    positive_cases = Column(Integer, default=0)
+    negative_cases = Column(Integer, default=0)
+    positive_negative_ratio = Column(Float)
+    missing_price_count = Column(Integer, default=0)
+    stale_price_count = Column(Integer, default=0)
+    duplicate_case_count = Column(Integer, default=0)
+    suspicious_split_count = Column(Integer, default=0)
+    extreme_outlier_count = Column(Integer, default=0)
+    leakage_check_pass = Column(Boolean, default=True)
+    quality_score = Column(Float)
+    warnings = Column(JSON)
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class PredictionLog(Base):
     __tablename__ = "prediction_logs"
     id = Column(Integer, primary_key=True, index=True)

@@ -225,4 +225,77 @@ def predict_symbol(symbol: str, market: str) -> Dict:
     pred["status"] = "ok"
     pred["symbol"] = symbol
     pred["market"] = market
+
+    # 過去5年training_feature_vectorとの類似度も計算
+    try:
+        from app.services.training_builder import get_training_features_for_matching
+        tlibrary = get_training_features_for_matching(limit=2000).get("items", [])
+        if tlibrary:
+            hist = _match_training_library(current, tlibrary, top_k=5)
+            pred.update(hist)
+    except Exception as e:
+        print(f"training match failed: {e}")
     return pred
+
+
+def _match_training_library(current: Dict, library: List[Dict], top_k: int = 5) -> Dict:
+    """過去5年training_feature_vector との類似度マッチ"""
+    if not library:
+        return {
+            "historical_positive_similarity": 0,
+            "historical_negative_similarity": 0,
+            "overextended_failure_similarity": 0,
+            "weak_material_failure_similarity": 0,
+            "material_exhaustion_failure_similarity": 0,
+            "similar_historical_cases": [],
+            "failure_similarity_type": None,
+            "training_based_score_adjustment": 0,
+        }
+
+    scored = []
+    for c in library:
+        dist = _numeric_distance(current, c)
+        similarity = max(0.0, 1.0 - dist)
+        scored.append({"case": c, "similarity": similarity})
+    scored.sort(key=lambda x: x["similarity"], reverse=True)
+    top = scored[:top_k]
+
+    def avg(items, predicate):
+        sims = [x["similarity"] for x in items if predicate(x["case"])]
+        return round(sum(sims) / max(1, len(sims)), 4) if sims else 0.0
+
+    positives = avg(scored[:30], lambda c: c.get("case_type") in ("positive_surge", "semi_positive_surge"))
+    negatives = avg(scored[:30], lambda c: c.get("case_type") and c.get("case_type").startswith(("negative_", "failed_")))
+    overext = avg(scored[:30], lambda c: c.get("case_type") == "failed_overextended")
+    weak = avg(scored[:30], lambda c: c.get("case_type") == "failed_weak_material")
+    exh = avg(scored[:30], lambda c: c.get("case_type") == "failed_material_exhaustion")
+    bad = avg(scored[:30], lambda c: c.get("case_type") == "failed_bad_news")
+
+    # 最も似ている失敗タイプ
+    fail_map = {"overextended": overext, "weak_material": weak, "material_exhaustion": exh, "bad_news": bad}
+    fail_type = max(fail_map.items(), key=lambda x: x[1])
+    failure_type = fail_type[0] if fail_type[1] >= 0.3 else None
+
+    adj = round((positives - negatives) * 30, 1)
+    # ペナルティ系
+    if overext >= 0.5: adj -= 10
+    if weak >= 0.5: adj -= 5
+    if exh >= 0.5: adj -= 10
+
+    return {
+        "historical_positive_similarity": positives,
+        "historical_negative_similarity": negatives,
+        "overextended_failure_similarity": overext,
+        "weak_material_failure_similarity": weak,
+        "material_exhaustion_failure_similarity": exh,
+        "bad_news_failure_similarity": bad,
+        "similar_historical_cases": [{
+            "symbol": x["case"].get("symbol"),
+            "case_type": x["case"].get("case_type"),
+            "label_hit_20_percent": x["case"].get("label_hit_20_percent"),
+            "label_max_gain_20d": x["case"].get("label_max_gain_20d"),
+            "similarity": round(x["similarity"], 4),
+        } for x in top],
+        "failure_similarity_type": failure_type,
+        "training_based_score_adjustment": adj,
+    }
