@@ -237,13 +237,20 @@ export default function ScreeningPage() {
                   {[
                     ["symbol", "コード"], ["name", "銘柄名"], ["market", "市場"],
                     ["jpy_price", "円換算価格"], ["price_change_1d", "前日比%"],
+                    ["prediction_label", "🔮予測ラベル"],
+                    ["final_prediction_score", "🔮final"],
+                    ["positive_case_similarity", "類似ポジ"],
+                    ["negative_case_similarity", "類似ネガ"],
+                    ["overextension_risk_score", "過熱"],
                     ["volume", "出来高"], ["volume_ratio", "出来高倍率"],
                     ["ma25_deviation", "25MA乖離%"], ["upside_to_resistance", "上値余地%"],
                     ["support_distance", "支持線距離%"], ["trend_state", "トレンド"],
                     ["candle_state", "ローソク足"], ["chart_pattern_primary", "パターン"],
                     ["volume_cycle_state", "出来高サイクル"], ["chart_cycle_state", "チャートサイクル"],
-                    ["material_status", "材料"], ["total_score", "スコア"],
-                    ["classification", "判定"], ["warning_flags", "警告"],
+                    ["total_score", "旧スコア"],
+                    ["reason_summary", "理由"],
+                    ["avoid_condition", "見送り条件"],
+                    ["warning_flags", "警告"],
                   ].map(([key, label]) => (
                     <th key={key} className="px-2 py-2 text-left text-gray-500 font-medium whitespace-nowrap cursor-pointer hover:bg-gray-100"
                       onClick={() => { setSortKey(key); setSortDir(d => d === "desc" ? "asc" : "desc"); }}>
@@ -266,6 +273,24 @@ export default function ScreeningPage() {
                     <td className={`px-2 py-1.5 text-right font-medium ${(r.price_change_1d ?? 0) >= 0 ? "text-green-600" : "text-red-500"}`}>
                       {r.price_change_1d?.toFixed(2)}%
                     </td>
+                    {/* AAR予測フィールド */}
+                    <td className="px-2 py-1.5 text-xs">
+                      {(r as any).prediction_label ? (
+                        <span className={`px-1.5 py-0.5 rounded font-medium ${
+                          (r as any).prediction_label?.includes("急騰前夜") ? "bg-green-100 text-green-700" :
+                          (r as any).prediction_label?.includes("条件付き") ? "bg-blue-100 text-blue-700" :
+                          (r as any).prediction_label?.includes("警戒") ? "bg-orange-100 text-orange-700" :
+                          (r as any).prediction_label?.includes("除外") ? "bg-gray-100 text-gray-500" :
+                          "bg-gray-50 text-gray-700"
+                        }`}>{(r as any).prediction_label}</span>
+                      ) : "-"}
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-bold text-blue-600">{(r as any).final_prediction_score?.toFixed(0) ?? "-"}</td>
+                    <td className="px-2 py-1.5 text-right text-green-600">{(r as any).positive_case_similarity?.toFixed(2) ?? "-"}</td>
+                    <td className="px-2 py-1.5 text-right text-red-500">{(r as any).negative_case_similarity?.toFixed(2) ?? "-"}</td>
+                    <td className={`px-2 py-1.5 text-right ${((r as any).overextension_risk_score ?? 0) >= 60 ? "text-red-500 font-bold" : "text-gray-600"}`}>
+                      {(r as any).overextension_risk_score?.toFixed(0) ?? "-"}
+                    </td>
                     <td className="px-2 py-1.5 text-right text-gray-600">{r.volume?.toLocaleString()}</td>
                     <td className="px-2 py-1.5 text-right text-gray-600">{r.volume_ratio?.toFixed(2)}x</td>
                     <td className={`px-2 py-1.5 text-right font-medium ${(r.ma25_deviation ?? 0) > 50 ? "text-red-500" : (r.ma25_deviation ?? 0) > 20 ? "text-orange-500" : "text-gray-600"}`}>
@@ -280,9 +305,9 @@ export default function ScreeningPage() {
                     <td className="px-2 py-1.5 text-gray-600 whitespace-nowrap max-w-28 truncate">{r.chart_pattern_primary}</td>
                     <td className="px-2 py-1.5"><VolCycleBadge state={r.volume_cycle_state} /></td>
                     <td className="px-2 py-1.5 whitespace-nowrap text-gray-600">{r.chart_cycle_state}</td>
-                    <td className="px-2 py-1.5 text-gray-500">{r.material_status}</td>
                     <td className="px-2 py-1.5 w-20"><ScoreBar score={r.total_score} /></td>
-                    <td className="px-2 py-1.5"><ClassificationBadge cls={r.classification} /></td>
+                    <td className="px-2 py-1.5 text-gray-600 max-w-40 truncate" title={(r as any).reason_summary}>{(r as any).reason_summary || "-"}</td>
+                    <td className="px-2 py-1.5 text-orange-600 max-w-40 truncate" title={(r as any).avoid_condition}>{(r as any).avoid_condition || "-"}</td>
                     <td className="px-2 py-1.5 text-orange-500 max-w-32 truncate">{(r.warning_flags || []).join(", ")}</td>
                   </tr>
                 ))}

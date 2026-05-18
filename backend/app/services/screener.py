@@ -34,6 +34,106 @@ _screening_progress: Dict[str, Any] = {
 _lock = threading.Lock()
 
 
+def _compute_overextension(r: Dict) -> float:
+    """スクリーニング結果から上がり切りスコアを再計算"""
+    ma25_dev = r.get("ma25_deviation") or 0
+    pc_5 = r.get("price_change_5d") or 0
+    pc_20 = r.get("price_change_20d") or 0
+    overext = 0.0
+    if ma25_dev >= 50:
+        overext += 40
+    elif ma25_dev >= 30:
+        overext += 25
+    elif ma25_dev >= 15:
+        overext += 10
+    if pc_5 >= 30:
+        overext += 25
+    elif pc_5 >= 15:
+        overext += 10
+    if pc_20 >= 80:
+        overext += 30
+    elif pc_20 >= 40:
+        overext += 15
+    return min(100.0, overext)
+
+
+def _compute_pre_night_signal(r: Dict) -> float:
+    """急騰前夜兆候スコア (0-100)"""
+    score = 0.0
+    vol_cycle = r.get("volume_cycle_state", "")
+    chart_cycle = r.get("chart_cycle_state", "")
+    upside = r.get("upside_to_resistance") or 0
+    support_dist = r.get("support_distance") or 0
+    vol_ratio = r.get("volume_ratio") or 1.0
+    overext = _compute_overextension(r)
+
+    if vol_cycle in ("再点火開始", "再点火待ち"):
+        score += 25
+    elif vol_cycle in ("売り枯れ", "価格維持"):
+        score += 20
+    elif vol_cycle == "先行大商い":
+        score += 15
+
+    if chart_cycle in ("値幅収縮", "ブレイク直前", "安値切り上げ"):
+        score += 25
+    elif chart_cycle in ("初動後押し目", "支持線維持"):
+        score += 18
+
+    if upside >= 25:
+        score += 20
+    elif upside >= 20:
+        score += 15
+
+    if 0 < support_dist < 10:
+        score += 15
+    elif support_dist < 15:
+        score += 8
+
+    if overext < 30:
+        score += 15
+    elif overext < 50:
+        score += 5
+
+    return min(100.0, score)
+
+
+def _infer_t1_judgement(r: Dict) -> str:
+    """既存のスクリーニング結果から T-1判定相当を推定"""
+    upside = r.get("upside_to_resistance") or 0
+    overext = _compute_overextension(r)
+    vol_cycle = r.get("volume_cycle_state", "")
+    chart_cycle = r.get("chart_cycle_state", "")
+
+    if overext >= 70:
+        return "見送り"
+    if upside < 15:
+        return "見送り"
+    if vol_cycle in ("再点火開始", "売り枯れ", "価格維持") and chart_cycle in ("値幅収縮", "ブレイク直前", "安値切り上げ", "初動後押し目", "支持線維持"):
+        if upside >= 20:
+            return "入る余地あり"
+        return "条件付き"
+    return "条件付き"
+
+
+def _build_avoid_condition(r: Dict, pred: Dict) -> str:
+    """追いかけ禁止/見送り条件のサマリ"""
+    bits = []
+    overext = _compute_overextension(r)
+    if overext >= 60:
+        bits.append("上がり切り(25MA乖離・短期上昇率過大)")
+    if (r.get("upside_to_resistance") or 0) < 20:
+        bits.append("上値余地20%未満")
+    if (r.get("support_distance") or 999) < 0:
+        bits.append("支持線割れ")
+    if "weak_material" in (pred.get("reason_summary") or "") or pred.get("weak_material_flag"):
+        bits.append("会社固有材料未確認")
+    if pred.get("t0_only_similarity", 0) > 0.6:
+        bits.append("T0初動のみ型に類似(後追い禁止)")
+    if pred.get("negative_case_similarity", 0) > pred.get("positive_case_similarity", 0):
+        bits.append("ネガティブ過去ケース類似が優勢")
+    return " / ".join(bits) if bits else "明確な見送り条件なし"
+
+
 def get_progress() -> Dict:
     with _lock:
         return dict(_screening_progress)
@@ -329,7 +429,58 @@ def _run_screening(params: Dict):
             }
             results.append(result)
 
-        results.sort(key=lambda x: x["total_score"], reverse=True)
+        # ===== AAR予測ラベル付与 =====
+        try:
+            from app.services import aar_db
+            from app.services.predictor import match_against_library
+
+            library = aar_db.get_feature_vectors_for_matching(limit=2000)
+            for r in results:
+                # 銘柄ごとに現在の特徴量(=結果の中の数値)から類似マッチング
+                current = {
+                    "t1_volume_ratio_20d": r.get("volume_ratio"),
+                    "t1_price_change_1d": r.get("price_change_1d"),
+                    "t1_price_change_3d": r.get("price_change_5d"),  # 近似
+                    "t1_price_change_5d": r.get("price_change_5d"),
+                    "t1_price_change_20d": r.get("price_change_20d"),
+                    "t1_ma25_deviation": r.get("ma25_deviation"),
+                    "t1_support_distance": r.get("support_distance"),
+                    "t1_resistance_upside": r.get("upside_to_resistance"),
+                    "t1_range_break_flag": False,
+                    "t1_high_close_flag": False,
+                    "t1_overextension_score": _compute_overextension(r),
+                    "setup_type": r.get("main_archetype"),
+                    "volume_type": r.get("volume_cycle_state"),
+                    "chart_type": r.get("chart_cycle_state"),
+                    "catalyst_category": "公式材料なし",
+                    "weak_material_flag": True,
+                    "t1_judgement": _infer_t1_judgement(r),
+                    "t1_entry_possible": "条件付き",
+                    "catalyst_strength_score": 20,
+                    "catalyst_continuity_score": 30,
+                }
+                pred = match_against_library(current, library, top_k=5)
+                r["prediction_label"] = pred.get("prediction_label")
+                r["entry_timing_type"] = pred.get("entry_timing_type")
+                r["final_prediction_score"] = pred.get("final_prediction_score")
+                r["t1_entry_possible_estimate"] = pred.get("t1_entry_possible_estimate")
+                r["pattern_similarity_score"] = pred.get("positive_case_similarity", 0)
+                r["positive_case_similarity"] = pred.get("positive_case_similarity", 0)
+                r["negative_case_similarity"] = pred.get("negative_case_similarity", 0)
+                r["t0_only_similarity"] = pred.get("t0_only_similarity", 0)
+                r["overextension_similarity"] = pred.get("overextension_similarity", 0)
+                r["overextension_risk_score"] = pred.get("overextension_risk_score", 0)
+                r["catalyst_quality_score"] = pred.get("catalyst_quality_score", 0)
+                r["catalyst_continuity_score"] = pred.get("catalyst_continuity_score", 0)
+                r["pre_night_signal_score"] = _compute_pre_night_signal(r)
+                r["bad_news_vacuum_score"] = 0  # 材料不明環境では0
+                r["matched_past_cases"] = pred.get("matched_cases", [])
+                r["reason_summary"] = pred.get("reason_summary")
+                r["avoid_condition"] = _build_avoid_condition(r, pred)
+        except Exception as e:
+            print(f"prediction integration failed: {e}")
+
+        results.sort(key=lambda x: (x.get("final_prediction_score") or x.get("total_score") or 0), reverse=True)
 
         # DBに保存
         try:

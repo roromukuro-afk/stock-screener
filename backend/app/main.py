@@ -14,6 +14,12 @@ from app.routers import dashboard, screening, stocks, exclusions, export, backte
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    try:
+        from app.services.pattern_seed import seed_patterns
+        n = seed_patterns()
+        print(f"[startup] pattern_library seeded: {n} patterns")
+    except Exception as e:
+        print(f"[startup] pattern seed failed: {e}")
     yield
 
 

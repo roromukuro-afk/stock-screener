@@ -266,6 +266,34 @@ def predict_current(req: PredictBatchRequest):
     return {"status": "started", "count": len(req.symbols)}
 
 
+@router.get("/patterns")
+def list_patterns():
+    """pattern_library の seed パターン一覧"""
+    from app.database import SessionLocal
+    from app.models.models import PatternLibrary
+    db = SessionLocal()
+    try:
+        rows = db.query(PatternLibrary).all()
+        return clean_for_json({
+            "total": len(rows),
+            "items": [
+                {
+                    "id": r.id,
+                    "pattern_name": r.pattern_name,
+                    "pattern_category": r.pattern_category,
+                    "description": r.description,
+                    "required_conditions": r.required_conditions,
+                    "positive_conditions": r.positive_conditions,
+                    "negative_conditions": r.negative_conditions,
+                    "exclusion_conditions": r.exclusion_conditions,
+                    "confidence_weight": r.confidence_weight,
+                } for r in rows
+            ]
+        })
+    finally:
+        db.close()
+
+
 @router.get("/predict-progress")
 def predict_progress():
     with _predict_lock:

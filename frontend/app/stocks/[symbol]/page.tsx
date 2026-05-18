@@ -187,6 +187,35 @@ export default function StockDetailPage({ params }: { params: Promise<{ symbol: 
             <p className="text-orange-600 text-xs font-bold">⚠️ 警告フラグ: {data.warning_flags.join(", ")}</p>
           </div>
         )}
+
+        {/* AAR予測ラベル */}
+        {data.prediction_label && (
+          <div className="mt-3 p-3 rounded border" style={{
+            background: data.prediction_label.includes("急騰前夜") ? "#f0fdf4" :
+              data.prediction_label.includes("条件付き") ? "#eff6ff" :
+              data.prediction_label.includes("警戒") ? "#fff7ed" :
+              data.prediction_label.includes("除外") ? "#f9fafb" : "#fefce8"
+          }}>
+            <div className="flex justify-between items-start">
+              <div>
+                <p className="text-xs text-gray-500">🔮 AAR予測ラベル</p>
+                <p className="font-bold text-lg text-gray-800">{data.prediction_label}</p>
+                <p className="text-xs text-gray-600">{data.entry_timing_type}</p>
+              </div>
+              <div className="text-right">
+                <p className="text-xs text-gray-500">final_prediction_score</p>
+                <p className="text-3xl font-bold text-blue-700">{data.final_prediction_score?.toFixed(0) ?? "-"}</p>
+              </div>
+            </div>
+            {data.reason_summary && (
+              <p className="text-sm text-gray-700 mt-2"><span className="font-medium">理由:</span> {data.reason_summary}</p>
+            )}
+            {data.avoid_condition && data.avoid_condition !== "明確な見送り条件なし" && (
+              <p className="text-sm text-orange-600 mt-1"><span className="font-medium">⚠️ 見送り/追いかけ禁止条件:</span> {data.avoid_condition}</p>
+            )}
+          </div>
+        )}
+
         <div className="mt-3 p-2 bg-yellow-50 rounded text-yellow-700 text-xs">
           ※ これは投資助言ではありません。最終判断はユーザー自身が行ってください。
         </div>
@@ -312,6 +341,55 @@ export default function StockDetailPage({ params }: { params: Promise<{ symbol: 
               <InfoRow label="材料状況" value={data.material_status} />
             </div>
           </Section>
+
+          {/* 予測スコア */}
+          {data.prediction_label && (
+            <Section title="🔮 AAR予測スコア内訳">
+              <InfoRow label="prediction_label" value={data.prediction_label} highlight />
+              <InfoRow label="entry_timing_type" value={data.entry_timing_type} />
+              <InfoRow label="final_prediction_score" value={data.final_prediction_score?.toFixed(1)} highlight />
+              <InfoRow label="pre_night_signal_score" value={data.pre_night_signal_score?.toFixed(0)} />
+              <InfoRow label="positive_case_similarity" value={data.positive_case_similarity?.toFixed(3)} />
+              <InfoRow label="negative_case_similarity" value={data.negative_case_similarity?.toFixed(3)} />
+              <InfoRow label="t0_only_similarity" value={data.t0_only_similarity?.toFixed(3)} />
+              <InfoRow label="overextension_similarity" value={data.overextension_similarity?.toFixed(3)} />
+              <InfoRow label="overextension_risk_score" value={data.overextension_risk_score?.toFixed(0)} />
+              <InfoRow label="catalyst_quality_score" value={data.catalyst_quality_score?.toFixed(0)} />
+              <InfoRow label="catalyst_continuity_score" value={data.catalyst_continuity_score?.toFixed(0)} />
+              <InfoRow label="t1_entry_possible_estimate" value={data.t1_entry_possible_estimate} />
+            </Section>
+          )}
+
+          {/* 類似過去ケース */}
+          {data.matched_past_cases && data.matched_past_cases.length > 0 && (
+            <Section title="🔍 類似した過去急騰ケース TOP5">
+              <div className="space-y-2">
+                {data.matched_past_cases.slice(0, 5).map((c, i) => (
+                  <div key={i} className="border border-gray-100 rounded p-2 bg-gray-50">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <p className="font-mono font-bold text-gray-800 text-xs">{c.symbol}</p>
+                        <p className="text-xs text-gray-500">{c.move_date}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-xs font-bold text-blue-600">sim={c.similarity?.toFixed(3)}</p>
+                        <p className="text-xs">
+                          {c.is_positive && <span className="text-green-600">✓Positive</span>}
+                          {c.is_negative && <span className="text-red-500 ml-1">✗Negative</span>}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="mt-1 text-xs text-gray-600 grid grid-cols-2 gap-1">
+                      <div>setup: {c.setup_type || "-"}</div>
+                      <div>t1判定: {c.t1_judgement || "-"}</div>
+                      <div>catalyst: {c.catalyst_category || "-"}</div>
+                      <div>+20%: {c.hit_20_percent ? "✅" : "—"}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Section>
+          )}
 
           <Section title="アーキタイプ分類">
             <InfoRow label="主型" value={data.main_archetype} />

@@ -59,6 +59,25 @@ export interface ScreeningResult {
   exclude_flag?: boolean;
   exclude_reason?: string;
   ai_comment?: string;
+  // 予測関連
+  prediction_label?: string;
+  entry_timing_type?: string;
+  final_prediction_score?: number;
+  t1_entry_possible_estimate?: string;
+  catalyst_quality_score?: number;
+  catalyst_continuity_score?: number;
+  pre_night_signal_score?: number;
+  pattern_similarity_score?: number;
+  positive_case_similarity?: number;
+  negative_case_similarity?: number;
+  t0_only_similarity?: number;
+  overextension_similarity?: number;
+  overextension_risk_score?: number;
+  bad_news_vacuum_score?: number;
+  matched_past_cases?: Array<{ symbol: string; move_date: string; setup_type?: string; similarity: number; hit_20_percent?: boolean; t1_judgement?: string; catalyst_category?: string; is_positive?: boolean; is_negative?: boolean }>;
+  reason_summary?: string;
+  avoid_condition?: string;
+  freshness_status?: string;
 }
 
 export interface DashboardData {
