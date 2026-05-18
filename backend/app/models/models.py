@@ -388,6 +388,245 @@ class PatternLibrary(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class PredictionLog(Base):
+    __tablename__ = "prediction_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)
+    yahoo_symbol = Column(String)
+    name = Column(String)
+    market = Column(String)
+    prediction_date = Column(String, index=True)
+    prediction_datetime = Column(DateTime, server_default=func.now())
+    current_price_at_prediction = Column(Float)
+    jpy_price_at_prediction = Column(Float)
+    prediction_label = Column(String, index=True)
+    final_prediction_score = Column(Float)
+    entry_timing_type = Column(String)
+    entry_type = Column(String)
+    entry_zone_a_low = Column(Float)
+    entry_zone_a_high = Column(Float)
+    entry_zone_b_low = Column(Float)
+    entry_zone_b_high = Column(Float)
+    breakout_trigger_price = Column(Float)
+    stop_loss_price = Column(Float)
+    take_profit_1 = Column(Float)
+    take_profit_2 = Column(Float)
+    max_chase_price = Column(Float)
+    chase_prohibited = Column(Boolean, default=False)
+    catalyst_quality_score = Column(Float)
+    catalyst_continuity_score = Column(Float)
+    pre_night_signal_score = Column(Float)
+    pattern_similarity_score = Column(Float)
+    positive_case_similarity = Column(Float)
+    negative_case_similarity = Column(Float)
+    overextension_risk_score = Column(Float)
+    bad_news_vacuum_score = Column(Float)
+    material_confirmed = Column(Boolean, default=False)
+    catalyst_category = Column(String)
+    matched_past_cases = Column(JSON)
+    reason_summary = Column(Text)
+    avoid_condition = Column(Text)
+    data_freshness_status = Column(String)
+    chart_state = Column(String)
+    volume_cycle_state = Column(String)
+    support_line = Column(Float)
+    resistance_line = Column(Float)
+    ma25_deviation = Column(Float)
+    status = Column(String, default="open", index=True)  # open / reviewed / closed
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class PredictionOutcome(Base):
+    __tablename__ = "prediction_outcomes"
+    id = Column(Integer, primary_key=True, index=True)
+    prediction_log_id = Column(Integer, index=True)
+    symbol = Column(String, index=True)
+    prediction_date = Column(String)
+    check_date = Column(String)
+    trading_days_elapsed = Column(Integer)
+    close_price = Column(Float)
+    high_price = Column(Float)
+    low_price = Column(Float)
+    volume = Column(Float)
+    return_from_prediction = Column(Float)
+    max_gain_so_far = Column(Float)
+    max_drawdown_so_far = Column(Float)
+    hit_20_percent = Column(Boolean, default=False)
+    hit_take_profit_1 = Column(Boolean, default=False)
+    hit_take_profit_2 = Column(Boolean, default=False)
+    stop_loss_hit = Column(Boolean, default=False)
+    invalidation_hit = Column(Boolean, default=False)
+    trigger_hit = Column(Boolean, default=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class PredictionReview(Base):
+    __tablename__ = "prediction_reviews"
+    id = Column(Integer, primary_key=True, index=True)
+    prediction_log_id = Column(Integer, index=True, unique=True)
+    symbol = Column(String, index=True)
+    prediction_date = Column(String)
+    review_date = Column(String)
+    success_label = Column(String, index=True)  # 成功/条件付き成功/失敗/見送り正解/追いかけ禁止正解/未判定
+    success_score = Column(Float)
+    max_gain = Column(Float)
+    max_drawdown = Column(Float)
+    hit_20_percent = Column(Boolean, default=False)
+    stop_loss_hit = Column(Boolean, default=False)
+    trigger_hit = Column(Boolean, default=False)
+    entry_plan_worked = Column(Boolean, default=False)
+    failed_reason_category = Column(String)
+    failed_reason_detail = Column(Text)
+    ai_review_comment = Column(Text)
+    should_save_as_positive_training = Column(Boolean, default=False)
+    should_save_as_negative_training = Column(Boolean, default=False)
+    saved_as_training = Column(Boolean, default=False)
+    saved_aar_case_id = Column(Integer)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class PredictionFailurePattern(Base):
+    __tablename__ = "prediction_failure_patterns"
+    id = Column(Integer, primary_key=True, index=True)
+    failure_pattern_name = Column(String, unique=True, index=True)
+    description = Column(Text)
+    conditions = Column(JSON)
+    example_symbols = Column(JSON)
+    penalty_weight = Column(Float, default=1.0)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+# ===== Material research =====
+class MaterialResearchJob(Base):
+    __tablename__ = "material_research_jobs"
+    id = Column(Integer, primary_key=True, index=True)
+    status = Column(String, index=True)
+    symbol = Column(String)
+    market = Column(String)
+    source_scope = Column(String)
+    total_sources_checked = Column(Integer, default=0)
+    found_count = Column(Integer, default=0)
+    confirmed_count = Column(Integer, default=0)
+    error_message = Column(Text)
+    started_at = Column(DateTime, server_default=func.now())
+    finished_at = Column(DateTime)
+
+
+class MaterialEvent(Base):
+    __tablename__ = "material_events"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)
+    yahoo_symbol = Column(String)
+    market = Column(String)
+    title = Column(Text)
+    summary = Column(Text)
+    source_url = Column(Text)
+    source_type = Column(String)
+    source_rank = Column(String)
+    published_at = Column(String)
+    detected_at = Column(DateTime, server_default=func.now())
+    catalyst_category = Column(String, index=True)
+    catalyst_timing = Column(String)
+    catalyst_quality_score = Column(Float)
+    catalyst_continuity_score = Column(Float)
+    catalyst_freshness_score = Column(Float)
+    catalyst_surprise_score = Column(Float)
+    theme_tailwind_score = Column(Float)
+    material_confirmed = Column(Boolean, default=False)
+    material_text = Column(Text)
+    ai_analysis = Column(Text)
+    risk_flags = Column(JSON)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class MaterialSourceCache(Base):
+    __tablename__ = "material_source_cache"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)
+    source_url = Column(Text)
+    source_type = Column(String)
+    fetched_at = Column(DateTime, server_default=func.now())
+    content_hash = Column(String)
+    title = Column(Text)
+    text_excerpt = Column(Text)
+    status = Column(String)
+    error_message = Column(Text)
+
+
+# ===== Entry plans =====
+class EntryPlan(Base):
+    __tablename__ = "entry_plans"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)
+    screening_date = Column(String, index=True)
+    entry_type = Column(String)
+    entry_zone_a_low = Column(Float)
+    entry_zone_a_high = Column(Float)
+    entry_zone_b_low = Column(Float)
+    entry_zone_b_high = Column(Float)
+    entry_zone_c_low = Column(Float)
+    entry_zone_c_high = Column(Float)
+    breakout_trigger_price = Column(Float)
+    reclaim_line = Column(Float)
+    pullback_buy_zone_low = Column(Float)
+    pullback_buy_zone_high = Column(Float)
+    invalidation_price = Column(Float)
+    stop_loss_price = Column(Float)
+    take_profit_1 = Column(Float)
+    take_profit_2 = Column(Float)
+    take_profit_3 = Column(Float)
+    risk_reward_1 = Column(Float)
+    risk_reward_2 = Column(Float)
+    max_chase_price = Column(Float)
+    chase_prohibited = Column(Boolean, default=False)
+    gap_up_warning = Column(Boolean, default=False)
+    position_size_hint = Column(String)
+    entry_comment = Column(Text)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+# ===== Auto training =====
+class AutoTrainingJob(Base):
+    __tablename__ = "auto_training_jobs"
+    id = Column(Integer, primary_key=True, index=True)
+    status = Column(String, index=True)
+    target_date = Column(String)
+    market_scope = Column(String)
+    threshold_percent = Column(Float)
+    total_universe_count = Column(Integer, default=0)
+    surge_detected_count = Column(Integer, default=0)
+    analyzed_count = Column(Integer, default=0)
+    saved_case_count = Column(Integer, default=0)
+    duplicate_count = Column(Integer, default=0)
+    failed_count = Column(Integer, default=0)
+    error_message = Column(Text)
+    started_at = Column(DateTime, server_default=func.now())
+    finished_at = Column(DateTime)
+
+
+class AutoTrainingResult(Base):
+    __tablename__ = "auto_training_results"
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, index=True)
+    symbol = Column(String, index=True)
+    market = Column(String)
+    target_date = Column(String)
+    move_percent = Column(Float)
+    detected_as_surge = Column(Boolean, default=False)
+    analyzed = Column(Boolean, default=False)
+    saved_to_training = Column(Boolean, default=False)
+    duplicate = Column(Boolean, default=False)
+    aar_case_id = Column(Integer)
+    catalyst_category = Column(String)
+    t1_judgement = Column(String)
+    prediction_label = Column(String)
+    error_message = Column(Text)
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class CurrentPredictionMatch(Base):
     __tablename__ = "current_prediction_matches"
     id = Column(Integer, primary_key=True, index=True)

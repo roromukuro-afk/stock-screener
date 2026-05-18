@@ -85,6 +85,31 @@ export const api = {
     fetchAPI("/api/universe/refresh-prices", { method: "POST", body: JSON.stringify(params) }),
   universeRefreshProgress: () => fetchAPI("/api/universe/refresh-progress"),
   universeStalePrices: (limit = 500) => fetchAPI(`/api/universe/stale-prices?limit=${limit}`),
+  // prediction log + review
+  savePredictionLog: (result: object, entry_plan?: object) =>
+    fetchAPI("/api/prediction-log/save", { method: "POST", body: JSON.stringify({ result, entry_plan }) }),
+  listPredictionLogs: (limit = 200, status?: string) =>
+    fetchAPI(`/api/prediction-log/list?limit=${limit}${status ? "&status=" + status : ""}`),
+  predictionLog: (id: number) => fetchAPI(`/api/prediction-log/${id}`),
+  deletePredictionLog: (id: number) => fetchAPI(`/api/prediction-log/${id}`, { method: "DELETE" }),
+  updatePredictionOutcomes: () => fetchAPI("/api/prediction-review/update-outcomes", { method: "POST", body: "{}" }),
+  reviewPrediction: (id: number) => fetchAPI(`/api/prediction-review/review/${id}`, { method: "POST", body: "{}" }),
+  reviewAllPredictions: () => fetchAPI("/api/prediction-review/review-all", { method: "POST", body: "{}" }),
+  reviewSummary: () => fetchAPI("/api/prediction-review/summary"),
+  reviewResults: (limit = 200) => fetchAPI(`/api/prediction-review/results?limit=${limit}`),
+  saveReviewAsTraining: (id: number) => fetchAPI(`/api/prediction-review/save-as-training/${id}`, { method: "POST", body: "{}" }),
+  // entry plan + forecast
+  entryPlan: (result: object) => fetchAPI("/api/entry-plan/generate", { method: "POST", body: JSON.stringify({ result }) }),
+  chartForecast: (result: object) => fetchAPI("/api/chart-forecast/generate", { method: "POST", body: JSON.stringify({ result }) }),
+  // material
+  materialResearch: (params: { symbol: string; market?: string; user_text?: string; urls?: string[] }) =>
+    fetchAPI("/api/materials/research", { method: "POST", body: JSON.stringify(params) }),
+  // auto training
+  autoTrainingRun: (params: object) =>
+    fetchAPI("/api/auto-training/run-daily", { method: "POST", body: JSON.stringify(params) }),
+  autoTrainingProgress: () => fetchAPI("/api/auto-training/progress"),
+  autoTrainingJobs: () => fetchAPI("/api/auto-training/jobs"),
+  autoTrainingResults: () => fetchAPI("/api/auto-training/results"),
   // settings
   settings: () => fetchAPI("/api/settings"),
   saveSetting: (key: string, value: string) =>

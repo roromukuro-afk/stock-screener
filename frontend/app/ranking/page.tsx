@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { api } from "@/lib/api";
+import { api, fetchAPI } from "@/lib/api";
 
 interface PredictionResult {
   symbol: string;
@@ -108,10 +108,23 @@ function PredictionCard({ r }: { r: PredictionResult }) {
         </div>
       )}
 
-      <Link href={`/stocks/${encodeURIComponent(r.symbol)}`}
-        className="mt-2 block text-center text-xs py-1.5 bg-blue-50 text-blue-600 rounded hover:bg-blue-100">
-        詳細 →
-      </Link>
+      <div className="flex gap-1 mt-2">
+        <Link href={`/stocks/${encodeURIComponent(r.symbol)}`}
+          className="flex-1 text-center text-xs py-1.5 bg-blue-50 text-blue-600 rounded hover:bg-blue-100">
+          詳細 →
+        </Link>
+        <button onClick={async () => {
+          try {
+            const ep = await api.entryPlan(r as object);
+            const res = await api.savePredictionLog(r as object, ep);
+            alert(`予測として保存しました (log_id=${res.log_id})`);
+          } catch (e: any) {
+            alert("保存失敗: " + e.message);
+          }
+        }} className="flex-1 text-xs py-1.5 bg-emerald-100 text-emerald-700 rounded hover:bg-emerald-200">
+          💾 予測保存
+        </button>
+      </div>
     </div>
   );
 }
