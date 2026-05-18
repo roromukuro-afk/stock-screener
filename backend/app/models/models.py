@@ -211,6 +211,202 @@ class UniverseUpdateJob(Base):
     finished_at = Column(DateTime)
 
 
+class AARInputCase(Base):
+    __tablename__ = "aar_input_cases"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)
+    yahoo_symbol = Column(String)
+    name = Column(String)
+    market = Column(String)
+    move_date = Column(String, index=True)
+    move_percent_user = Column(Float)
+    move_percent_calculated = Column(Float)
+    user_memo = Column(Text)
+    material_url = Column(Text)
+    source_file = Column(String)
+    status = Column(String)  # pending / analyzed / failed
+    error_message = Column(Text)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AARAnalysisCase(Base):
+    __tablename__ = "aar_analysis_cases"
+    id = Column(Integer, primary_key=True, index=True)
+    input_case_id = Column(Integer, index=True)
+    symbol = Column(String, index=True)
+    yahoo_symbol = Column(String)
+    name = Column(String)
+    market = Column(String)
+    move_date = Column(String, index=True)
+    move_percent = Column(Float)
+
+    # 材料分析
+    catalyst = Column(Text)
+    catalyst_category = Column(String, index=True)
+    catalyst_timing = Column(String)
+    catalyst_strength_score = Column(Float)
+    catalyst_continuity_score = Column(Float)
+    material_confirmed = Column(Boolean, default=False)
+    material_source_rank = Column(String)
+
+    # T-1判定
+    t1_judgement = Column(String, index=True)
+    t1_entry_possible = Column(String)
+    t1_entry_type = Column(String)
+
+    # 分類
+    setup_type = Column(String, index=True)
+    volume_type = Column(String, index=True)
+    chart_type = Column(String, index=True)
+    volatility_type = Column(String)
+    ma_support_state = Column(String)
+
+    # リスクスコア
+    overextension_risk_score = Column(Float)
+    bad_news_vacuum_score = Column(Float)
+    material_exhaustion_risk_score = Column(Float)
+
+    # 警告フラグ
+    t0_only_flag = Column(Boolean, default=False)
+    already_ran_flag = Column(Boolean, default=False)
+    weak_material_flag = Column(Boolean, default=False)
+    bad_news_unresolved_flag = Column(Boolean, default=False)
+    dilution_risk_flag = Column(Boolean, default=False)
+
+    # 兆候
+    t3_signs = Column(Text)
+    t2_signs = Column(Text)
+    t1_signs = Column(Text)
+    entry_condition = Column(Text)
+    stop_condition = Column(Text)
+    take_profit_condition = Column(Text)
+    avoid_condition = Column(Text)
+    failure_warnings = Column(Text)
+    risk_reward = Column(String)
+
+    tags = Column(JSON)
+    nlm_data_raw = Column(Text)
+
+    # ラベル
+    is_positive_case = Column(Boolean, default=False)
+    is_negative_case = Column(Boolean, default=False)
+
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AAROHLCVSnapshot(Base):
+    __tablename__ = "aar_ohlcv_snapshots"
+    id = Column(Integer, primary_key=True, index=True)
+    case_id = Column(Integer, index=True)
+    symbol = Column(String, index=True)
+    date = Column(String, index=True)
+    relative_day = Column(String, index=True)  # T-60, T-3, T-2, T-1, T0, T+1, T+5, T+20
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    volume = Column(Float)
+    price_change_pct = Column(Float)
+    volume_ratio_20d = Column(Float)
+    ma5 = Column(Float)
+    ma25 = Column(Float)
+    ma75 = Column(Float)
+    ma200 = Column(Float)
+    ma25_deviation = Column(Float)
+    support_line = Column(Float)
+    resistance_line = Column(Float)
+    resistance_upside = Column(Float)
+    support_distance = Column(Float)
+    candle_state = Column(String)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class AARFeatureVector(Base):
+    __tablename__ = "aar_feature_vectors"
+    id = Column(Integer, primary_key=True, index=True)
+    case_id = Column(Integer, index=True)
+    symbol = Column(String, index=True)
+    move_date = Column(String, index=True)
+    feature_asof_date = Column(String, index=True)  # T-1 date
+
+    # T-1のスナップショット
+    t1_close = Column(Float)
+    t1_volume = Column(Float)
+    t1_volume_ratio_20d = Column(Float)
+    t2_volume_ratio_20d = Column(Float)
+    t3_volume_ratio_20d = Column(Float)
+    t1_price_change_1d = Column(Float)
+    t1_price_change_3d = Column(Float)
+    t1_price_change_5d = Column(Float)
+    t1_price_change_20d = Column(Float)
+    t1_ma5_deviation = Column(Float)
+    t1_ma25_deviation = Column(Float)
+    t1_support_distance = Column(Float)
+    t1_resistance_upside = Column(Float)
+    t1_range_break_flag = Column(Boolean)
+    t1_high_close_flag = Column(Boolean)
+    t1_lower_shadow_flag = Column(Boolean)
+    t1_upper_shadow_flag = Column(Boolean)
+    t1_gap_risk = Column(Float)
+    t1_overextension_score = Column(Float)
+
+    # T-1の材料判定
+    t1_fresh_material_flag = Column(Boolean)
+    t1_known_event_flag = Column(Boolean)
+    t1_unknown_material_flag = Column(Boolean)
+    t1_stale_material_flag = Column(Boolean)
+    t1_bad_news_risk_flag = Column(Boolean)
+    t1_dilution_risk_flag = Column(Boolean)
+    t1_earnings_cross_flag = Column(Boolean)
+    t1_theme_tailwind_flag = Column(Boolean)
+
+    # ラベル (T0以降, 検証用)
+    t0_result_move_percent = Column(Float)
+    t1_to_t5_max_gain = Column(Float)
+    t1_to_t20_max_gain = Column(Float)
+    t1_to_t20_max_drawdown = Column(Float)
+    hit_20_percent = Column(Boolean)
+
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class PatternLibrary(Base):
+    __tablename__ = "pattern_library"
+    id = Column(Integer, primary_key=True, index=True)
+    pattern_name = Column(String, unique=True, index=True)
+    pattern_category = Column(String, index=True)
+    description = Column(Text)
+    required_conditions = Column(JSON)
+    positive_conditions = Column(JSON)
+    negative_conditions = Column(JSON)
+    exclusion_conditions = Column(JSON)
+    example_symbols = Column(JSON)
+    confidence_weight = Column(Float, default=1.0)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class CurrentPredictionMatch(Base):
+    __tablename__ = "current_prediction_matches"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)
+    screening_date = Column(String, index=True)
+    matched_pattern_id = Column(Integer)
+    similarity_score = Column(Float)
+    matched_cases = Column(JSON)
+    matched_conditions = Column(JSON)
+    missing_conditions = Column(JSON)
+    contradiction_conditions = Column(JSON)
+    t1_entry_possible_estimate = Column(String)
+    prediction_label = Column(String, index=True)
+    entry_timing_type = Column(String)
+    final_prediction_score = Column(Float)
+    reason_summary = Column(Text)
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class UniverseSourceFile(Base):
     __tablename__ = "universe_source_files"
     id = Column(Integer, primary_key=True, index=True)

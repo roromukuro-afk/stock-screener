@@ -9,6 +9,8 @@ const navItems = [
   { href: "/ranking", label: "候補ランキング" },
   { href: "/excluded", label: "除外銘柄" },
   { href: "/exclusion-list", label: "除外リスト管理" },
+  { href: "/aar-analyzer", label: "🔬 AAR自動分析" },
+  { href: "/aar-learning", label: "🎓 AAR学習データ" },
   { href: "/aar", label: "AAR出力" },
   { href: "/backtest", label: "バックテスト" },
   { href: "/settings", label: "設定" },
