@@ -50,7 +50,7 @@ def get_usd_jpy() -> float:
 
 def _fetch_from_yahoo_api(symbol: str, period: str = "3mo") -> Optional[pd.DataFrame]:
     """直接Yahoo Finance Chart APIを叩く(yfinanceに依存しない)"""
-    range_map = {"1mo": "1mo", "3mo": "3mo", "6mo": "6mo", "1y": "1y", "2y": "2y"}
+    range_map = {"1mo": "1mo", "3mo": "3mo", "6mo": "6mo", "1y": "1y", "2y": "2y", "5y": "5y", "10y": "10y", "max": "max"}
     yf_range = range_map.get(period, "3mo")
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     params = {"interval": "1d", "range": yf_range}
