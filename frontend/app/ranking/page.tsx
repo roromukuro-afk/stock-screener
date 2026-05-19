@@ -27,6 +27,18 @@ interface PredictionResult {
   matched_past_cases?: Array<{ symbol: string; move_date: string; setup_type?: string; similarity: number; hit_20_percent?: boolean }>;
   reason_summary?: string;
   avoid_condition?: string;
+  // 過去5年training_feature_vectorとの類似度
+  historical_positive_similarity?: number;
+  historical_negative_similarity?: number;
+  overextended_failure_similarity?: number;
+  weak_material_failure_similarity?: number;
+  material_exhaustion_failure_similarity?: number;
+  bad_news_failure_similarity?: number;
+  failure_similarity_type?: string;
+  training_based_score_adjustment?: number;
+  similar_historical_cases?: Array<{ symbol: string; case_type: string; similarity: number; label_max_gain_20d?: number; label_hit_20_percent?: boolean }>;
+  material_confirmed?: boolean;
+  catalyst_category?: string;
   // 既存
   volume_cycle_state?: string;
   chart_cycle_state?: string;
@@ -95,6 +107,40 @@ function PredictionCard({ r }: { r: PredictionResult }) {
       )}
       {r.avoid_condition && r.avoid_condition !== "明確な見送り条件なし" && (
         <p className="text-xs text-orange-600 mb-2"><span className="font-medium">⚠️ 見送り条件:</span> {r.avoid_condition}</p>
+      )}
+
+      {/* 学習反映 */}
+      {(r.training_based_score_adjustment !== undefined && r.training_based_score_adjustment !== null) && (
+        <div className={`text-xs mb-2 px-2 py-1 rounded ${
+          (r.training_based_score_adjustment ?? 0) > 0 ? "bg-green-50 text-green-700" :
+          (r.training_based_score_adjustment ?? 0) < 0 ? "bg-red-50 text-red-700" : "bg-gray-50 text-gray-600"
+        }`}>
+          <div className="font-medium">🧠 学習反映: {(r.training_based_score_adjustment ?? 0) >= 0 ? "+" : ""}{r.training_based_score_adjustment?.toFixed(1)}</div>
+          {(r.historical_positive_similarity ?? 0) > 0.3 && (
+            <div className="text-xs">✅ positive類似 {((r.historical_positive_similarity ?? 0) * 100).toFixed(0)}%</div>
+          )}
+          {(r.historical_negative_similarity ?? 0) > 0.3 && (
+            <div className="text-xs">⚠️ negative類似 {((r.historical_negative_similarity ?? 0) * 100).toFixed(0)}%</div>
+          )}
+          {r.failure_similarity_type && (
+            <div className="text-xs">🚨 失敗型類似: {r.failure_similarity_type}</div>
+          )}
+        </div>
+      )}
+
+      {/* 過去5年類似ケース */}
+      {r.similar_historical_cases && r.similar_historical_cases.length > 0 && (
+        <div className="text-xs text-gray-500 mb-2">
+          <span className="font-medium">5年類似:</span>{" "}
+          {r.similar_historical_cases.slice(0, 3).map((c, i) => (
+            <span key={i} className={`inline-block ml-1 px-1.5 py-0.5 rounded font-mono text-xs ${
+              c.case_type?.startsWith("positive") ? "bg-green-100 text-green-700" :
+              c.case_type?.startsWith("failed") ? "bg-red-100 text-red-700" : "bg-gray-100"
+            }`}>
+              {c.symbol}({c.case_type?.slice(0, 8)}, {(c.similarity * 100).toFixed(0)}%)
+            </span>
+          ))}
+        </div>
       )}
 
       {r.matched_past_cases && r.matched_past_cases.length > 0 && (

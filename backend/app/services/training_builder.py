@@ -184,6 +184,84 @@ def _clean_float(v) -> Optional[float]:
         return None
 
 
+def _clean_int(v) -> Optional[int]:
+    try:
+        if v is None:
+            return None
+        f = float(v)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return int(f)
+    except (TypeError, ValueError):
+        return None
+
+
+def _clean_str(v) -> Optional[str]:
+    if v is None:
+        return None
+    try:
+        s = str(v).strip()
+        if not s or s.lower() == "nan":
+            return None
+        # pandas.Timestamp -> "YYYY-MM-DD" 形式に正規化
+        if len(s) > 10 and s[10] == " ":
+            s = s[:10]
+        return s
+    except Exception:
+        return None
+
+
+def _clean_bool(v) -> bool:
+    if v is None:
+        return False
+    try:
+        if isinstance(v, bool):
+            return v
+        return bool(v)
+    except Exception:
+        return False
+
+
+def _sanitize_event_dict(e: Dict) -> Dict:
+    """surge_event 用に全フィールドを Python 標準型に変換 (PostgreSQL安全)"""
+    return {
+        "symbol": _clean_str(e.get("symbol")),
+        "yahoo_symbol": _clean_str(e.get("yahoo_symbol") or e.get("symbol")),
+        "name": _clean_str(e.get("name")),
+        "market": _clean_str(e.get("market")),
+        "event_date": _clean_str(e.get("event_date")),
+        "move_percent": _clean_float(e.get("move_percent")),
+        "threshold_type": _clean_str(e.get("threshold_type")),
+        "close_t_minus_1": _clean_float(e.get("close_t_minus_1")),
+        "close_t0": _clean_float(e.get("close_t0")),
+        "volume_t0": _clean_float(e.get("volume_t0")),
+        "volume_ratio_t0": _clean_float(e.get("volume_ratio_t0")),
+        "source": _clean_str(e.get("source")) or "training_builder",
+        "is_valid": _clean_bool(e.get("is_valid")),
+        "validation_warning": _clean_str(e.get("validation_warning")),
+    }
+
+
+def _sanitize_feature_dict(f: Dict) -> Dict:
+    """training_feature_vector用sanitize"""
+    out = {}
+    bool_keys = {
+        "high_close_flag", "low_close_flag", "range_break_flag", "squeeze_flag",
+        "prior_big_volume_flag", "selling_exhaustion_flag", "reaccumulation_flag",
+        "pre_breakout_flag", "material_known_flag", "bad_news_flag",
+        "dilution_risk_flag", "label_hit_20_percent",
+    }
+    str_keys = {"candle_state", "catalyst_category", "label_success_class"}
+    for k, v in f.items():
+        if k in bool_keys:
+            out[k] = _clean_bool(v)
+        elif k in str_keys:
+            out[k] = _clean_str(v)
+        else:
+            out[k] = _clean_float(v)
+    return out
+
+
 def _list_history_for_symbol(symbol: str) -> Optional[pd.DataFrame]:
     db: Session = SessionLocal()
     try:
@@ -255,12 +333,20 @@ def _detect_surge_events_for_symbol(symbol: str, market: str,
     return events
 
 
-def _save_surge_events(events: List[Dict]):
-    """surge_events を保存。1件ずつ try-commit で PostgreSQL 安全"""
+def _save_surge_events(events: List[Dict]) -> int:
+    """surge_events を保存 — 全sanitize済み, per-row commit, エラーはautomation_errorsへ"""
     if not events:
-        return
+        return 0
+    from app.models.models import AutomationError
     saved = 0
-    for e in events:
+    failed = 0
+    for raw in events:
+        e = _sanitize_event_dict(raw)
+        # 必須フィールド検証
+        if not e.get("symbol") or not e.get("event_date") or e.get("move_percent") is None:
+            failed += 1
+            continue
+
         db: Session = SessionLocal()
         try:
             db.query(SurgeEvent).filter(
@@ -272,9 +358,26 @@ def _save_surge_events(events: List[Dict]):
             saved += 1
         except Exception as ex:
             db.rollback()
-            print(f"save_surge_event failed {e.get('symbol')} {e.get('event_date')}: {ex}")
+            failed += 1
+            # automation_errors に記録
+            try:
+                err_db = SessionLocal()
+                err_db.add(AutomationError(
+                    job_id=None,
+                    symbol=e.get("symbol"),
+                    market=e.get("market"),
+                    step="save_surge_event",
+                    error_type=type(ex).__name__,
+                    error_message=str(ex)[:500],
+                    traceback=f"event_date={e.get('event_date')} threshold={e.get('threshold_type')} move%={e.get('move_percent')}",
+                ))
+                err_db.commit()
+                err_db.close()
+            except Exception:
+                pass
         finally:
             db.close()
+    return saved
 
 
 # =============== T-1特徴量抽出 ===============
@@ -528,21 +631,22 @@ def _save_training_window_and_features(symbol: str, market: str, df: pd.DataFram
         if existing:
             return existing.id
 
-        t1_date = str(df.iloc[t0_idx - 1]["date"]) if t0_idx >= 1 else None
-        t0_date = str(df.iloc[t0_idx]["date"])
+        t1_date = _clean_str(df.iloc[t0_idx - 1]["date"]) if t0_idx >= 1 else None
+        t0_date = _clean_str(df.iloc[t0_idx]["date"])
         window_start_idx = max(0, t0_idx - 60)
         window_end_idx = min(len(df) - 1, t0_idx + 20)
         win = TrainingWindow(
-            symbol=symbol, market=market, event_date=event_date,
-            case_type=case_type,
-            window_start=str(df.iloc[window_start_idx]["date"]),
-            window_end=str(df.iloc[window_end_idx]["date"]),
+            symbol=_clean_str(symbol), market=_clean_str(market),
+            event_date=_clean_str(event_date),
+            case_type=_clean_str(case_type),
+            window_start=_clean_str(df.iloc[window_start_idx]["date"]),
+            window_end=_clean_str(df.iloc[window_end_idx]["date"]),
             t1_date=t1_date, t0_date=t0_date,
-            max_gain_20d=labels.get("max_gain_20d"),
-            max_drawdown_20d=labels.get("max_drawdown_20d"),
-            hit_20_percent=labels.get("hit_20_percent", False),
-            hit_10_percent=labels.get("hit_10_percent", False),
-            stop_loss_like_drawdown=labels.get("max_drawdown_20d"),
+            max_gain_20d=_clean_float(labels.get("max_gain_20d")),
+            max_drawdown_20d=_clean_float(labels.get("max_drawdown_20d")),
+            hit_20_percent=_clean_bool(labels.get("hit_20_percent")),
+            hit_10_percent=_clean_bool(labels.get("hit_10_percent")),
+            stop_loss_like_drawdown=_clean_float(labels.get("max_drawdown_20d")),
         )
         db.add(win)
         db.flush()
@@ -558,22 +662,39 @@ def _save_training_window_and_features(symbol: str, market: str, df: pd.DataFram
             )
         )
 
+        sanitized = _sanitize_feature_dict({k: v for k, v in features.items() if hasattr(TrainingFeatureVector, k)})
         fv = TrainingFeatureVector(
             training_window_id=win.id,
-            symbol=symbol, market=market,
-            feature_asof_date=t1_date, case_type=case_type,
-            **{k: v for k, v in features.items() if hasattr(TrainingFeatureVector, k)},
-            label_hit_20_percent=labels.get("hit_20_percent", False),
-            label_max_gain_20d=labels.get("max_gain_20d"),
-            label_max_drawdown_20d=labels.get("max_drawdown_20d"),
-            label_success_class=success_class,
+            symbol=_clean_str(symbol), market=_clean_str(market),
+            feature_asof_date=t1_date, case_type=_clean_str(case_type),
+            **sanitized,
+            label_hit_20_percent=_clean_bool(labels.get("hit_20_percent")),
+            label_max_gain_20d=_clean_float(labels.get("max_gain_20d")),
+            label_max_drawdown_20d=_clean_float(labels.get("max_drawdown_20d")),
+            label_success_class=_clean_str(success_class),
         )
         db.add(fv)
         db.commit()
         return win.id
     except Exception as e:
         db.rollback()
-        print(f"save training window failed {symbol} {event_date}: {e}")
+        # automation_errors に記録
+        try:
+            from app.models.models import AutomationError
+            err_db = SessionLocal()
+            err_db.add(AutomationError(
+                job_id=None,
+                symbol=symbol,
+                market=market,
+                step="save_training_window",
+                error_type=type(e).__name__,
+                error_message=str(e)[:500],
+                traceback=f"event_date={event_date} case_type={case_type}",
+            ))
+            err_db.commit()
+            err_db.close()
+        except Exception:
+            pass
         return None
     finally:
         db.close()
