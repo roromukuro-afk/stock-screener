@@ -291,11 +291,21 @@ def _detect_surge_events_for_symbol(symbol: str, market: str,
 
     events = []
     for i in range(1, len(closes)):
-        prev = closes[i - 1]
-        curr = closes[i]
-        if prev is None or prev <= 0:
+        prev_raw = closes[i - 1]
+        curr_raw = closes[i]
+        # NaN/inf を完全排除
+        try:
+            prev = float(prev_raw)
+            curr = float(curr_raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(prev) or math.isnan(curr) or math.isinf(prev) or math.isinf(curr):
+            continue
+        if prev <= 0 or curr <= 0:
             continue
         move = (curr - prev) / prev * 100
+        if math.isnan(move) or math.isinf(move):
+            continue
         # split検出: -50%急落 or +200%急騰 はwarning
         warning = None
         if move <= -45 or move >= 200:
@@ -337,14 +347,29 @@ def _save_surge_events(events: List[Dict]) -> int:
     """surge_events を保存 — 全sanitize済み, per-row commit, エラーはautomation_errorsへ"""
     if not events:
         return 0
-    from app.models.models import AutomationError
+    from app.models.models import AutomationError  # noqa: F401
     saved = 0
     failed = 0
     for raw in events:
         e = _sanitize_event_dict(raw)
-        # 必須フィールド検証
+        # 必須フィールド検証 — 失敗もautomation_errorsへ
         if not e.get("symbol") or not e.get("event_date") or e.get("move_percent") is None:
             failed += 1
+            try:
+                err_db = SessionLocal()
+                err_db.add(AutomationError(
+                    job_id=None,
+                    symbol=str(raw.get("symbol") or "?"),
+                    market=str(raw.get("market") or "?"),
+                    step="save_surge_event_validation",
+                    error_type="ValidationError",
+                    error_message=f"missing required field: symbol={e.get('symbol')} event_date={e.get('event_date')} move%={e.get('move_percent')}",
+                    traceback=f"raw_event={str(raw)[:300]}",
+                ))
+                err_db.commit()
+                err_db.close()
+            except Exception:
+                pass
             continue
 
         db: Session = SessionLocal()
