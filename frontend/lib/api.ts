@@ -110,6 +110,18 @@ export const api = {
   autoTrainingProgress: () => fetchAPI("/api/auto-training/progress"),
   autoTrainingJobs: () => fetchAPI("/api/auto-training/jobs"),
   autoTrainingResults: () => fetchAPI("/api/auto-training/results"),
+  // automation
+  automationStatus: () => fetchAPI("/api/automation/status"),
+  automationJobs: (limit = 50) => fetchAPI(`/api/automation/jobs?limit=${limit}`),
+  automationErrors: (limit = 50) => fetchAPI(`/api/automation/errors?limit=${limit}`),
+  // material helpers
+  materialsForSymbol: (symbol: string) => fetchAPI(`/api/materials/${encodeURIComponent(symbol)}`),
+  materialsRecent: (limit = 100) => fetchAPI(`/api/materials/recent?limit=${limit}`),
+  // training builder
+  trainingBuilderSummary: () => fetchAPI("/api/training-builder/summary"),
+  trainingBuilderProgress: () => fetchAPI("/api/training-builder/progress"),
+  trainingBuilderRun: (params: object) =>
+    fetchAPI("/api/training-builder/build-all", { method: "POST", body: JSON.stringify(params) }),
   // settings
   settings: () => fetchAPI("/api/settings"),
   saveSetting: (key: string, value: string) =>

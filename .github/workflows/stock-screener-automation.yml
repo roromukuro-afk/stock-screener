@@ -1,0 +1,186 @@
+name: stock-screener automation
+
+on:
+  schedule:
+    # === 日本株 ===
+    - cron: "40 7 * * 1-5"   # JST 16:40 (UTC 07:40) 平日: JP daily 急騰検出 + AAR分析
+    - cron: "10 8 * * 1-5"   # JST 17:10 (UTC 08:10) 平日: JP ランキング+予測自動保存
+    # === 米国株 ===
+    - cron: "40 22 * * 1-5"  # JST 07:40 (UTC 22:40) 平日: US daily
+    - cron: "10 23 * * 1-5"  # JST 08:10 (UTC 23:10) 平日: US ランキング+予測自動保存
+    # === 共通 ===
+    - cron: "0 0 * * 1-5"    # JST 09:00 (UTC 00:00) 平日: 予測検証 + 教師化
+    - cron: "0 14 * * 0,6"   # JST 23:00 (UTC 14:00) 土日: 週次 training-builder
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "実行するジョブ"
+        required: true
+        default: "status"
+        type: choice
+        options:
+          - status
+          - run-daily-jp
+          - run-daily-us
+          - run-screening-and-save-predictions-jp
+          - run-screening-and-save-predictions-us
+          - update-prediction-outcomes
+          - review-predictions
+          - save-reviews-as-training
+          - run-training-builder-known-seed
+          - run-training-builder-smallcap
+          - run-full-daily-pipeline-jp
+          - run-full-daily-pipeline-us
+
+jobs:
+  automate:
+    runs-on: ubuntu-latest
+    env:
+      BACKEND_URL: ${{ secrets.BACKEND_URL }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+    steps:
+      - name: Show what will run
+        run: |
+          echo "schedule: $GITHUB_EVENT_SCHEDULE"
+          echo "manual job: ${{ inputs.job }}"
+
+      - name: Wake up Render (ping health)
+        if: env.BACKEND_URL != ''
+        run: |
+          curl -s --max-time 60 "$BACKEND_URL/api/health" || true
+          # Render Free のスリープから復帰させるため一回叩いて待つ
+          sleep 8
+
+      # ===== schedule based dispatch =====
+      - name: JST 16:40 - JP daily
+        if: github.event_name == 'schedule' && github.event.schedule == '40 7 * * 1-5'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"cron","max_symbols":300}' \
+            "$BACKEND_URL/api/automation/run-daily-jp"
+
+      - name: JST 17:10 - JP screening + save predictions
+        if: github.event_name == 'schedule' && github.event.schedule == '10 8 * * 1-5'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"cron","max_symbols":200,"min_score":65}' \
+            "$BACKEND_URL/api/automation/run-screening-and-save-predictions"
+
+      - name: JST 07:40 - US daily
+        if: github.event_name == 'schedule' && github.event.schedule == '40 22 * * 1-5'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"US","trigger_type":"cron","max_symbols":300}' \
+            "$BACKEND_URL/api/automation/run-daily-us"
+
+      - name: JST 08:10 - US screening + save predictions
+        if: github.event_name == 'schedule' && github.event.schedule == '10 23 * * 1-5'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"US","trigger_type":"cron","max_symbols":200,"min_score":65}' \
+            "$BACKEND_URL/api/automation/run-screening-and-save-predictions"
+
+      - name: JST 09:00 - update outcomes + review + save training
+        if: github.event_name == 'schedule' && github.event.schedule == '0 0 * * 1-5'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" -d '{"trigger_type":"cron"}' \
+            "$BACKEND_URL/api/automation/update-prediction-outcomes"
+          sleep 20
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" -d '{"trigger_type":"cron"}' \
+            "$BACKEND_URL/api/automation/review-predictions"
+          sleep 20
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" -d '{"trigger_type":"cron"}' \
+            "$BACKEND_URL/api/automation/save-reviews-as-training"
+
+      - name: Weekend JST 23:00 - training builder (known seed + smallcap)
+        if: github.event_name == 'schedule' && github.event.schedule == '0 14 * * 0,6'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" -d '{"trigger_type":"cron"}' \
+            "$BACKEND_URL/api/automation/run-training-builder-known-seed"
+          sleep 60
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" -d '{"trigger_type":"cron"}' \
+            "$BACKEND_URL/api/automation/run-training-builder-smallcap"
+
+      # ===== manual dispatch =====
+      - name: Manual - status
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'status'
+        run: curl -s "$BACKEND_URL/api/automation/status"
+
+      - name: Manual - run-daily-jp
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-daily-jp'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"manual","max_symbols":300}' \
+            "$BACKEND_URL/api/automation/run-daily-jp"
+
+      - name: Manual - run-daily-us
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-daily-us'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"US","trigger_type":"manual","max_symbols":300}' \
+            "$BACKEND_URL/api/automation/run-daily-us"
+
+      - name: Manual - screening jp
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-screening-and-save-predictions-jp'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"manual","max_symbols":200}' \
+            "$BACKEND_URL/api/automation/run-screening-and-save-predictions"
+
+      - name: Manual - screening us
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-screening-and-save-predictions-us'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"US","trigger_type":"manual","max_symbols":200}' \
+            "$BACKEND_URL/api/automation/run-screening-and-save-predictions"
+
+      - name: Manual - update-prediction-outcomes
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'update-prediction-outcomes'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" -d '{"trigger_type":"manual"}' \
+            "$BACKEND_URL/api/automation/update-prediction-outcomes"
+
+      - name: Manual - review-predictions
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'review-predictions'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" -d '{"trigger_type":"manual"}' \
+            "$BACKEND_URL/api/automation/review-predictions"
+
+      - name: Manual - save-reviews-as-training
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'save-reviews-as-training'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" -d '{"trigger_type":"manual"}' \
+            "$BACKEND_URL/api/automation/save-reviews-as-training"
+
+      - name: Manual - run-training-builder-known-seed
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-training-builder-known-seed'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" -d '{"trigger_type":"manual"}' \
+            "$BACKEND_URL/api/automation/run-training-builder-known-seed"
+
+      - name: Manual - run-training-builder-smallcap
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-training-builder-smallcap'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" -d '{"trigger_type":"manual"}' \
+            "$BACKEND_URL/api/automation/run-training-builder-smallcap"
+
+      - name: Manual - run-full-daily-pipeline-jp
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-full-daily-pipeline-jp'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"manual"}' \
+            "$BACKEND_URL/api/automation/run-full-daily-pipeline"
+
+      - name: Manual - run-full-daily-pipeline-us
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-full-daily-pipeline-us'
+        run: |
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"US","trigger_type":"manual"}' \
+            "$BACKEND_URL/api/automation/run-full-daily-pipeline"
+
+      - name: Report status
+        if: always()
+        run: |
+          sleep 5
+          echo "--- automation status ---"
+          curl -s "$BACKEND_URL/api/automation/status" || true

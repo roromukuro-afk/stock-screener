@@ -388,6 +388,68 @@ class PatternLibrary(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class AutomationJob(Base):
+    __tablename__ = "automation_jobs"
+    id = Column(Integer, primary_key=True, index=True)
+    job_type = Column(String, index=True)
+    market = Column(String)
+    status = Column(String, index=True)
+    trigger_type = Column(String)  # cron / manual / api
+    run_key = Column(String)  # 重複防止用 yyyy-mm-dd-job_type-market
+    started_at = Column(DateTime, server_default=func.now())
+    finished_at = Column(DateTime)
+    duration_seconds = Column(Float)
+    total_symbols = Column(Integer, default=0)
+    processed_symbols = Column(Integer, default=0)
+    skipped_symbols = Column(Integer, default=0)
+    failed_symbols = Column(Integer, default=0)
+    detected_surge_count = Column(Integer, default=0)
+    detected_semi_surge_count = Column(Integer, default=0)
+    material_found_count = Column(Integer, default=0)
+    material_confirmed_count = Column(Integer, default=0)
+    positive_cases_created = Column(Integer, default=0)
+    semi_positive_cases_created = Column(Integer, default=0)
+    negative_cases_created = Column(Integer, default=0)
+    aar_cases_created = Column(Integer, default=0)
+    predictions_saved = Column(Integer, default=0)
+    outcomes_updated = Column(Integer, default=0)
+    reviews_created = Column(Integer, default=0)
+    training_cases_created = Column(Integer, default=0)
+    error_message = Column(Text)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AutomationError(Base):
+    __tablename__ = "automation_errors"
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, index=True)
+    symbol = Column(String, index=True)
+    market = Column(String)
+    step = Column(String)
+    error_type = Column(String)
+    error_message = Column(Text)
+    traceback = Column(Text)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class AutomationLock(Base):
+    __tablename__ = "automation_locks"
+    id = Column(Integer, primary_key=True, index=True)
+    lock_key = Column(String, unique=True, index=True)
+    locked_by = Column(String)
+    locked_at = Column(DateTime, server_default=func.now())
+    expires_at = Column(DateTime)
+
+
+class AutomationSetting(Base):
+    __tablename__ = "automation_settings"
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String, unique=True, index=True)
+    value = Column(Text)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class HistoricalOHLCV(Base):
     __tablename__ = "historical_ohlcv"
     id = Column(Integer, primary_key=True, index=True)

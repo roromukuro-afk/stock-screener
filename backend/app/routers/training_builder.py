@@ -23,6 +23,10 @@ class BuildAllRequest(BaseModel):
     surge_threshold_percent: float = 20.0
     semi_surge_threshold_percent: float = 15.0
     negative_sample_ratio: float = 3.0
+    target_mode: str = "all"
+    # all / low_price_only / small_cap_priority / high_volatility_priority
+    # / jp_growth_priority / jp_low_price_priority / us_small_cap_priority
+    # / us_low_price_priority / adr_priority / random_sample / known_surge_seed
     exclude_etf: bool = True
     exclude_warrant: bool = True
     exclude_unit: bool = True

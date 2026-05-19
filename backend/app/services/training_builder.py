@@ -22,6 +22,92 @@ from app.services import universe_db
 from app.services.price_fetcher import get_stock_data
 
 
+# ===== known surge seed (過去に+20%以上急騰実績がある銘柄) =====
+KNOWN_SURGE_SEED_JP = [
+    "3936.T", "9256.T", "1434.T", "6613.T", "4316.T", "4422.T", "4582.T",
+    "5343.T", "6740.T", "8105.T", "9610.T", "3905.T", "485A.T", "2693.T",
+    "6480.T", "7162.T", "1436.T", "7256.T", "8137.T", "4368.T", "6141.T",
+    "2180.T", "4392.T", "2901.T", "4840.T", "3810.T", "6666.T",
+]
+KNOWN_SURGE_SEED_US = [
+    "AEHL", "SNAL", "AIFF", "AKAN", "ARTL", "ASNS", "ATER", "CNSP", "DRCT",
+    "INOD", "BWEN", "OSS", "KULR", "SKLZ", "PRSO", "PFSA", "TDIC", "TPET",
+    "EVC", "RXT", "BAND", "WEST", "CLNN", "AVTX", "ERNA", "MEI", "FNGR",
+    "EZGO", "OCG", "ABVE",
+]
+
+
+def get_seed_symbols(market: str = "BOTH") -> List[Dict]:
+    """known_surge_seedをuniverse形式で返す"""
+    result = []
+    if market in ("JP", "BOTH"):
+        for s in KNOWN_SURGE_SEED_JP:
+            result.append({"symbol": s, "yahoo_symbol": s, "name": s, "market": "JP"})
+    if market in ("US", "BOTH"):
+        for s in KNOWN_SURGE_SEED_US:
+            result.append({"symbol": s, "yahoo_symbol": s, "name": s, "market": "US"})
+    return result
+
+
+def select_target_universe(target_mode: str, markets: List[str], max_symbols: int, include_adr: bool) -> List[Dict]:
+    """target_modeに応じてuniverseを選定"""
+    from app.services import universe_db
+    from app.database import SessionLocal
+    from app.models.models import UniverseSymbol
+    from sqlalchemy import asc
+
+    if target_mode == "known_surge_seed":
+        m = "BOTH" if (len(markets) > 1 or "JP" in markets and "US" in markets) else markets[0] if markets else "BOTH"
+        seed = get_seed_symbols(m)
+        return seed[:max_symbols] if max_symbols > 0 else seed
+
+    if target_mode in ("low_price_only", "jp_low_price_priority", "us_low_price_priority"):
+        # 低位株: priceは持ってないので yahoo_symbol 末尾4桁数値が小さい(JP)などのヒューリスティック不可
+        # eligible全件取得→max_symbolsまで
+        return universe_db.list_eligible_yahoo_symbols(markets=markets, max_count=max_symbols, include_adr=include_adr)
+
+    if target_mode == "small_cap_priority":
+        # 小型株優先: nasdaqlisted小型は通常後ろの方の銘柄。eligibleの後半を取る
+        all_syms = universe_db.list_eligible_yahoo_symbols(markets=markets, max_count=0, include_adr=include_adr)
+        # ランダムシャッフルで小型側を含める
+        import random
+        random.seed(42)
+        random.shuffle(all_syms)
+        return all_syms[:max_symbols] if max_symbols > 0 else all_syms
+
+    if target_mode in ("us_small_cap_priority", "high_volatility_priority"):
+        all_syms = universe_db.list_eligible_yahoo_symbols(markets=["US"], max_count=0, include_adr=include_adr)
+        # USの3-5文字ティッカーは小型株が多い
+        small = [s for s in all_syms if len(s.get("symbol", "")) <= 4]
+        import random
+        random.seed(42)
+        random.shuffle(small)
+        return small[:max_symbols] if max_symbols > 0 else small
+
+    if target_mode == "adr_priority":
+        from app.database import SessionLocal
+        from app.models.models import UniverseSymbol
+        db = SessionLocal()
+        try:
+            rows = db.query(UniverseSymbol).filter(
+                UniverseSymbol.is_adr == True,
+                UniverseSymbol.is_screening_eligible == True,
+            ).limit(max_symbols if max_symbols > 0 else 1000).all()
+            return [{"symbol": r.symbol, "yahoo_symbol": r.yahoo_symbol or r.symbol,
+                     "name": r.name, "market": r.market} for r in rows]
+        finally:
+            db.close()
+
+    if target_mode == "random_sample":
+        all_syms = universe_db.list_eligible_yahoo_symbols(markets=markets, max_count=0, include_adr=include_adr)
+        import random
+        random.shuffle(all_syms)
+        return all_syms[:max_symbols] if max_symbols > 0 else all_syms
+
+    # default = "all"
+    return universe_db.list_eligible_yahoo_symbols(markets=markets, max_count=max_symbols, include_adr=include_adr)
+
+
 _progress: Dict = {
     "running": False, "status": "idle", "phase": "",
     "current_symbol": "", "processed_symbols": 0, "total_symbols": 0,
@@ -533,10 +619,11 @@ def run_build_all_sync(params: Dict):
     chunk_size = int(params.get("chunk_size", 20))
     surge_threshold = float(params.get("surge_threshold_percent", 20.0))
     semi_threshold = float(params.get("semi_surge_threshold_percent", 15.0))
+    target_mode = params.get("target_mode", "all")
 
-    market_scope = ",".join(markets) + (",ADR" if include_adr else "")
+    market_scope = f"{target_mode}:" + ",".join(markets) + (",ADR" if include_adr else "")
     job_id = _create_job(
-        "build_all", market_scope,
+        f"build_all/{target_mode}", market_scope,
         params.get("start_date", ""), params.get("end_date", ""),
     )
     with _lock:
@@ -549,9 +636,7 @@ def run_build_all_sync(params: Dict):
         })
 
     try:
-        syms = universe_db.list_eligible_yahoo_symbols(
-            markets=markets, max_count=max_symbols, include_adr=include_adr,
-        )
+        syms = select_target_universe(target_mode, markets, max_symbols, include_adr)
         _set(total_symbols=len(syms))
 
         for chunk_start in range(0, len(syms), chunk_size):

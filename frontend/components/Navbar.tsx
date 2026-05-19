@@ -15,6 +15,7 @@ const navItems = [
   { href: "/chart-forecast", label: "📐 チャート予測" },
   { href: "/auto-training", label: "🤖 自動収集" },
   { href: "/training-builder", label: "🏗 教師データ構築" },
+  { href: "/automation", label: "⚙️ 自動化" },
   { href: "/prediction-review", label: "🔁 予測検証" },
   { href: "/aar", label: "AAR出力" },
   { href: "/backtest", label: "バックテスト" },
