@@ -256,22 +256,25 @@ def _detect_surge_events_for_symbol(symbol: str, market: str,
 
 
 def _save_surge_events(events: List[Dict]):
-    db: Session = SessionLocal()
-    try:
-        # 既存event_dateで重複避ける
-        existing = set()
-        for e in events:
-            existing.add((e["symbol"], e["event_date"]))
-        for sym_date in list(existing):
-            sym, dt = sym_date
+    """surge_events を保存。1件ずつ try-commit で PostgreSQL 安全"""
+    if not events:
+        return
+    saved = 0
+    for e in events:
+        db: Session = SessionLocal()
+        try:
             db.query(SurgeEvent).filter(
-                SurgeEvent.symbol == sym, SurgeEvent.event_date == dt
+                SurgeEvent.symbol == e["symbol"],
+                SurgeEvent.event_date == e["event_date"],
             ).delete()
-        rows = [SurgeEvent(**e) for e in events]
-        db.add_all(rows)
-        db.commit()
-    finally:
-        db.close()
+            db.add(SurgeEvent(**e))
+            db.commit()
+            saved += 1
+        except Exception as ex:
+            db.rollback()
+            print(f"save_surge_event failed {e.get('symbol')} {e.get('event_date')}: {ex}")
+        finally:
+            db.close()
 
 
 # =============== T-1特徴量抽出 ===============
