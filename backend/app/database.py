@@ -29,11 +29,14 @@ if is_sqlite:
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 else:
+    # PostgreSQL: Render Freeの並列処理(thread多用)を吸収できるpool
     engine = create_engine(
         DATABASE_URL,
         pool_pre_ping=True,
-        pool_size=5,
-        max_overflow=10,
+        pool_recycle=300,
+        pool_size=10,
+        max_overflow=20,
+        pool_timeout=60,
         echo=False,
     )
 

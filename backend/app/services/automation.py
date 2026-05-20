@@ -241,6 +241,7 @@ def run_full_daily_pipeline(market: str = "JP", trigger_type: str = "cron") -> D
 
 # ===== サマリ =====
 def get_automation_status() -> Dict:
+    from zoneinfo import ZoneInfo
     db: Session = SessionLocal()
     try:
         from sqlalchemy import desc
@@ -253,9 +254,12 @@ def get_automation_status() -> Dict:
                           .order_by(desc(AutomationJob.id)).first())
         running = db.query(AutomationJob).filter(AutomationJob.status == "running").count()
 
-        today = date.today().isoformat()
+        # JST基準の今日 (UTC越境対策)
+        jst = ZoneInfo("Asia/Tokyo")
+        now_jst = datetime.now(jst)
+        today_start_utc = datetime(now_jst.year, now_jst.month, now_jst.day, tzinfo=jst).astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
         today_jobs = (db.query(AutomationJob)
-                      .filter(AutomationJob.started_at >= datetime.combine(date.today(), datetime.min.time()))
+                      .filter(AutomationJob.started_at >= today_start_utc)
                       .all())
         today_summary = {
             "jobs_today": len(today_jobs),
@@ -268,9 +272,19 @@ def get_automation_status() -> Dict:
             "training_cases_today": sum(j.training_cases_created or 0 for j in today_jobs),
         }
 
+        cron_secret_env = bool(os.getenv("CRON_SECRET"))
+        cron_secret_db = bool(_get_setting("cron_secret_marker"))
         return {
             "automation_enabled": _get_setting("automation_enabled", "true") == "true",
-            "cron_secret_configured": bool(os.getenv("CRON_SECRET")),
+            # 後方互換用 (既存UIが見ているフィールド)
+            "cron_secret_configured": cron_secret_env,
+            # 細分化された状態
+            "cron_secret_env_configured": cron_secret_env,
+            "cron_secret_db_configured": cron_secret_db,
+            "cron_secret_effective_configured": cron_secret_env,
+            "cron_secret_source": "render_env" if cron_secret_env else None,
+            "github_actions_workflow_exists": True,
+            "github_actions_secrets_note": "GitHub側Secretsはbackendから直接確認できません。/api/automation/test-cron-secret で接続テストしてください。",
             "latest_job_id": latest.id if latest else None,
             "latest_job_type": latest.job_type if latest else None,
             "latest_run_at": latest.started_at.isoformat() if latest and latest.started_at else None,
@@ -278,6 +292,7 @@ def get_automation_status() -> Dict:
             "latest_failure_at": latest_failure.started_at.isoformat() if latest_failure else None,
             "running_jobs": running,
             "today": today_summary,
+            "today_summary": today_summary,
             "training_data_balance": _get_training_balance(),
         }
     finally:

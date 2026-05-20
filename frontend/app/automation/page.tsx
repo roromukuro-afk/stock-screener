@@ -152,6 +152,12 @@ function SetupWizard({ cronSecretConfigured }: { cronSecretConfigured: boolean }
 interface Status {
   automation_enabled: boolean;
   cron_secret_configured: boolean;
+  cron_secret_env_configured?: boolean;
+  cron_secret_db_configured?: boolean;
+  cron_secret_effective_configured?: boolean;
+  cron_secret_source?: string | null;
+  github_actions_workflow_exists?: boolean;
+  github_actions_secrets_note?: string;
   latest_job_id: number | null;
   latest_job_type: string | null;
   latest_run_at: string | null;
@@ -222,8 +228,9 @@ export default function AutomationPage() {
         <div className="card p-4">
           <h2 className="font-bold text-gray-800 mb-3">🔧 自動化設定</h2>
           <StatusBadge label="自動化 (DB設定)" ok={status.automation_enabled} />
-          <StatusBadge label="CRON_SECRET 設定済み" ok={status.cron_secret_configured} txt={status.cron_secret_configured ? "configured" : "未設定"} />
-          <StatusBadge label="GitHub Actions" ok={true} txt=".github/workflows/stock-screener-automation.yml" />
+          <StatusBadge label="Render ENV: CRON_SECRET" ok={status.cron_secret_env_configured ?? status.cron_secret_configured} txt={(status.cron_secret_env_configured ?? status.cron_secret_configured) ? "設定済み" : "未設定 (Render側設定が必要)"} />
+          <StatusBadge label="GitHub Actions workflow" ok={status.github_actions_workflow_exists ?? true} txt=".github/workflows/stock-screener-automation.yml" />
+          <StatusBadge label="GitHub Actions Secret" ok={true} txt="GitHub側はWebから確認不可。下のLIVE接続テストで判定" />
           <div className="flex justify-between py-1 border-b border-gray-50">
             <span className="text-sm text-gray-600">最終ジョブ</span>
             <span className="text-sm font-mono">{status.latest_job_type || "-"} (id={status.latest_job_id || "-"})</span>
