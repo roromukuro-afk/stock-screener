@@ -58,6 +58,10 @@ jobs:
           curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
             -d '{"market":"JP","trigger_type":"cron","max_symbols":300}' \
             "$BACKEND_URL/api/automation/run-daily-jp"
+          sleep 30
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"trigger_type":"cron"}' \
+            "$BACKEND_URL/api/automation/research-materials-jp"
 
       - name: JST 17:10 - JP screening + save predictions
         if: github.event_name == 'schedule' && github.event.schedule == '10 8 * * 1-5'
@@ -72,6 +76,10 @@ jobs:
           curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
             -d '{"market":"US","trigger_type":"cron","max_symbols":300}' \
             "$BACKEND_URL/api/automation/run-daily-us"
+          sleep 30
+          curl -sS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"trigger_type":"cron","max_symbols":30}' \
+            "$BACKEND_URL/api/automation/research-materials-us"
 
       - name: JST 08:10 - US screening + save predictions
         if: github.event_name == 'schedule' && github.event.schedule == '10 23 * * 1-5'

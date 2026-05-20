@@ -130,6 +130,69 @@ def run_smallcap(req: TriggerRequest,
     return {"status": "started", "job_type": "training-smallcap"}
 
 
+@router.post("/research-materials-daily")
+def research_materials_daily(req: TriggerRequest,
+                              x_cron_secret: Optional[str] = Header(None),
+                              authorization: Optional[str] = Header(None)):
+    _check_secret(x_cron_secret, authorization)
+    from app.services import material_auto_collector
+    _run_async(material_auto_collector.collect_all_materials_daily)
+    return {"status": "started", "job_type": "research-materials-daily"}
+
+
+@router.post("/research-materials-jp")
+def research_materials_jp(req: TriggerRequest,
+                          x_cron_secret: Optional[str] = Header(None),
+                          authorization: Optional[str] = Header(None)):
+    _check_secret(x_cron_secret, authorization)
+    from app.services import material_auto_collector
+    _run_async(material_auto_collector.collect_jp_materials)
+    return {"status": "started", "job_type": "research-materials-jp"}
+
+
+@router.post("/research-materials-us")
+def research_materials_us(req: TriggerRequest,
+                          x_cron_secret: Optional[str] = Header(None),
+                          authorization: Optional[str] = Header(None)):
+    _check_secret(x_cron_secret, authorization)
+    from app.services import material_auto_collector
+    _run_async(material_auto_collector.collect_us_materials, None, req.max_symbols or 30)
+    return {"status": "started", "job_type": "research-materials-us"}
+
+
+@router.post("/test-cron-secret")
+def test_cron_secret(req: TriggerRequest,
+                     x_cron_secret: Optional[str] = Header(None),
+                     authorization: Optional[str] = Header(None)):
+    """CRON_SECRET接続テスト用エンドポイント (Web UIから設定確認可能)"""
+    required = os.getenv("CRON_SECRET", "")
+    if not required:
+        return {"status": "cron_secret_not_set", "message": "Render側のCRON_SECRETが未設定です"}
+    provided = x_cron_secret or ""
+    if not provided and authorization and authorization.lower().startswith("bearer "):
+        provided = authorization[7:]
+    if provided != required:
+        raise HTTPException(403, "invalid CRON_SECRET")
+    return {"status": "ok", "message": "CRON_SECRETが正しく設定されています"}
+
+
+@router.get("/next-runs")
+def next_runs():
+    """次回 cron 予定 (GitHub Actions cron 設定からの推測)"""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    # 予定リスト (UTC -> JST)
+    schedules = [
+        {"job": "JP daily", "cron_utc": "40 7 * * 1-5", "jst": "16:40 平日"},
+        {"job": "JP screening", "cron_utc": "10 8 * * 1-5", "jst": "17:10 平日"},
+        {"job": "US daily", "cron_utc": "40 22 * * 1-5", "jst": "07:40 平日"},
+        {"job": "US screening", "cron_utc": "10 23 * * 1-5", "jst": "08:10 平日"},
+        {"job": "outcomes + review + training save", "cron_utc": "0 0 * * 1-5", "jst": "09:00 平日"},
+        {"job": "weekend training builder", "cron_utc": "0 14 * * 0,6", "jst": "23:00 土日"},
+    ]
+    return {"now_utc": now.isoformat(), "schedules": schedules}
+
+
 @router.post("/run-full-daily-pipeline")
 def run_full_pipeline(req: TriggerRequest,
                       x_cron_secret: Optional[str] = Header(None),

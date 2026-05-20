@@ -1,6 +1,153 @@
 "use client";
 import { useEffect, useState, useCallback } from "react";
-import { fetchAPI } from "@/lib/api";
+import { fetchAPI, API_BASE_URL } from "@/lib/api";
+
+
+function SetupWizard({ cronSecretConfigured }: { cronSecretConfigured: boolean }) {
+  const [testSecret, setTestSecret] = useState("");
+  const [testResult, setTestResult] = useState<string>("");
+  const [copied, setCopied] = useState<string>("");
+  const [generated, setGenerated] = useState("");
+
+  const generateSecret = () => {
+    const arr = new Uint8Array(32);
+    crypto.getRandomValues(arr);
+    const hex = Array.from(arr).map(b => b.toString(16).padStart(2, "0")).join("");
+    setGenerated(hex);
+  };
+
+  const copy = async (text: string, key: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopied(key);
+    setTimeout(() => setCopied(""), 2000);
+  };
+
+  const testConnection = async () => {
+    setTestResult("テスト中...");
+    try {
+      const r = await fetch(`${API_BASE_URL}/api/automation/test-cron-secret`, {
+        method: "POST",
+        headers: {
+          "X-Cron-Secret": testSecret,
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      });
+      if (r.status === 200) {
+        setTestResult("✅ CRON_SECRET が一致 — 接続OK");
+      } else if (r.status === 403) {
+        setTestResult("❌ CRON_SECRET が不一致 — Renderの環境変数と同じ値を入力してください");
+      } else if (r.status === 503) {
+        setTestResult("⚠️ Render側のCRON_SECRETが未設定 — Render Dashboard → Environment で設定が必要");
+      } else {
+        const t = await r.text();
+        setTestResult(`HTTP ${r.status}: ${t.slice(0, 100)}`);
+      }
+    } catch (e: any) {
+      setTestResult(`接続エラー: ${e.message}`);
+    }
+  };
+
+  return (
+    <div className="card p-5 bg-blue-50 border-blue-200">
+      <div className="flex justify-between items-center mb-3">
+        <h2 className="font-bold text-blue-900">🧙 セットアップウィザード</h2>
+        <span className={`text-xs px-2 py-1 rounded ${cronSecretConfigured ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-700"}`}>
+          {cronSecretConfigured ? "✅ CRON_SECRET 設定済み" : "⚠️ CRON_SECRET 未設定"}
+        </span>
+      </div>
+
+      {!cronSecretConfigured && (
+        <div className="bg-orange-50 border border-orange-200 rounded p-3 mb-3 text-sm">
+          <p className="font-bold text-orange-700">⚠️ GitHub Actions自動実行はまだ動いていません</p>
+          <p className="text-orange-600 text-xs mt-1">以下のステップでセットアップを完了してください。</p>
+        </div>
+      )}
+
+      <ol className="space-y-3 text-sm">
+        <li className="bg-white rounded p-3 border border-gray-200">
+          <p className="font-bold text-gray-800 mb-2">STEP 1: CRON_SECRET を生成</p>
+          <div className="flex gap-2">
+            <button onClick={generateSecret}
+              className="px-3 py-1.5 bg-purple-600 text-white rounded text-xs hover:bg-purple-700">
+              🎲 ランダム生成 (64文字)
+            </button>
+            {generated && (
+              <>
+                <input value={generated} readOnly
+                  className="flex-1 border border-gray-200 rounded px-2 py-1.5 text-xs font-mono bg-gray-50" />
+                <button onClick={() => copy(generated, "secret")}
+                  className="px-3 py-1.5 bg-gray-100 text-gray-700 rounded text-xs hover:bg-gray-200">
+                  {copied === "secret" ? "✅" : "📋"}
+                </button>
+              </>
+            )}
+          </div>
+        </li>
+
+        <li className="bg-white rounded p-3 border border-gray-200">
+          <p className="font-bold text-gray-800 mb-2">STEP 2: GitHub Secrets に登録</p>
+          <p className="text-xs text-gray-600 mb-2">
+            <a href="https://github.com/roromukuro-afk/stock-screener/settings/secrets/actions" target="_blank" className="text-blue-600 hover:underline">
+              → GitHub Settings → Secrets and variables → Actions
+            </a>
+          </p>
+          <div className="space-y-1 text-xs">
+            <div className="flex gap-2 items-center">
+              <code className="bg-gray-100 px-2 py-0.5 rounded font-bold">BACKEND_URL</code>
+              <code className="bg-gray-50 px-2 py-0.5 rounded flex-1">{API_BASE_URL}</code>
+              <button onClick={() => copy(API_BASE_URL, "url")}
+                className="px-2 py-0.5 bg-gray-100 rounded">{copied === "url" ? "✅" : "📋"}</button>
+            </div>
+            <div className="flex gap-2 items-center">
+              <code className="bg-gray-100 px-2 py-0.5 rounded font-bold">CRON_SECRET</code>
+              <code className="bg-gray-50 px-2 py-0.5 rounded flex-1">{generated || "(STEP 1で生成した値)"}</code>
+            </div>
+          </div>
+        </li>
+
+        <li className="bg-white rounded p-3 border border-gray-200">
+          <p className="font-bold text-gray-800 mb-2">STEP 3: Render Environment に同じ CRON_SECRET を設定</p>
+          <p className="text-xs text-gray-600 mb-2">
+            <a href="https://dashboard.render.com/" target="_blank" className="text-blue-600 hover:underline">
+              → Render Dashboard → stock-screener-backend → Environment
+            </a>
+          </p>
+          <p className="text-xs text-gray-500">
+            Key: <code className="bg-gray-100 px-1">CRON_SECRET</code> Value: STEP 1 と同じ値<br />
+            設定後、自動再デプロイ完了まで2-3分待機。
+          </p>
+        </li>
+
+        <li className="bg-white rounded p-3 border border-gray-200">
+          <p className="font-bold text-gray-800 mb-2">STEP 4: 接続テスト</p>
+          <div className="flex gap-2">
+            <input value={testSecret} onChange={(e) => setTestSecret(e.target.value)}
+              placeholder="生成したCRON_SECRETをペースト"
+              className="flex-1 border border-gray-200 rounded px-2 py-1.5 text-xs font-mono" />
+            <button onClick={testConnection} disabled={!testSecret}
+              className="px-3 py-1.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50">
+              🔌 接続テスト
+            </button>
+          </div>
+          {testResult && <p className="text-xs mt-2">{testResult}</p>}
+        </li>
+
+        <li className="bg-white rounded p-3 border border-gray-200">
+          <p className="font-bold text-gray-800 mb-2">STEP 5: GitHub Actions で手動実行</p>
+          <p className="text-xs text-gray-600">
+            <a href="https://github.com/roromukuro-afk/stock-screener/actions" target="_blank" className="text-blue-600 hover:underline">
+              → GitHub Actions タブ
+            </a> → "stock-screener automation" → "Run workflow" → status を選択 → Run
+          </p>
+          <p className="text-xs text-gray-500 mt-1">
+            成功すれば自動ジョブ履歴に "trigger=manual" の行が追加されます。
+          </p>
+        </li>
+      </ol>
+    </div>
+  );
+}
 
 interface Status {
   automation_enabled: boolean;
@@ -219,17 +366,16 @@ export default function AutomationPage() {
         </div>
       )}
 
-      {/* セットアップガイド */}
-      <div className="card p-4 bg-blue-50 border-blue-200">
-        <h2 className="font-bold text-blue-900 mb-2">📚 セットアップ手順</h2>
-        <ol className="list-decimal ml-5 text-sm text-gray-700 space-y-1">
-          <li>GitHub リポジトリ Settings → Secrets and variables → Actions</li>
-          <li>New repository secret で <code className="bg-white px-1">BACKEND_URL</code> = <code className="bg-white px-1">https://stock-screener-backend-2h6a.onrender.com</code> を追加</li>
-          <li>New repository secret で <code className="bg-white px-1">CRON_SECRET</code> = 任意の長いランダム文字列を追加</li>
-          <li>Render Dashboard → Environment で同じ <code className="bg-white px-1">CRON_SECRET</code> を設定</li>
-          <li>GitHub Actions タブ → stock-screener automation → Run workflow で手動テスト</li>
-          <li>このページで自動ジョブ履歴が増えることを確認</li>
-        </ol>
+      {/* セットアップウィザード */}
+      <SetupWizard cronSecretConfigured={status.cron_secret_configured} />
+
+      {/* 関連リンク */}
+      <div className="card p-3 text-xs text-gray-500">
+        🔗 関連: <a href="/screener/learning-center" className="text-blue-600 hover:underline">AI学習センター</a> /{" "}
+        <a href="/screener/ai-analyst" className="text-blue-600 hover:underline">AI総合分析</a> /{" "}
+        <a href="/screener/training-builder" className="text-blue-600 hover:underline">教師データ構築</a> /{" "}
+        <a href="/screener/prediction-review" className="text-blue-600 hover:underline">予測検証</a> /{" "}
+        <a href="/screener/material-research" className="text-blue-600 hover:underline">材料調査</a>
       </div>
 
       <div className="card p-3 text-xs text-gray-500">

@@ -388,6 +388,31 @@ class PatternLibrary(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class ModelVersion(Base):
+    __tablename__ = "model_versions"
+    id = Column(Integer, primary_key=True, index=True)
+    version_name = Column(String, unique=True, index=True)
+    created_at = Column(DateTime, server_default=func.now())
+    training_case_count = Column(Integer, default=0)
+    positive_count = Column(Integer, default=0)
+    negative_count = Column(Integer, default=0)
+    review_count = Column(Integer, default=0)
+    weight_config = Column(JSON)
+    performance_summary = Column(JSON)
+    active = Column(Boolean, default=False, index=True)
+
+
+class ModelWeightHistory(Base):
+    __tablename__ = "model_weight_history"
+    id = Column(Integer, primary_key=True, index=True)
+    model_version_id = Column(Integer, index=True)
+    weight_name = Column(String, index=True)
+    old_value = Column(Float)
+    new_value = Column(Float)
+    reason = Column(Text)
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class AutomationJob(Base):
     __tablename__ = "automation_jobs"
     id = Column(Integer, primary_key=True, index=True)
