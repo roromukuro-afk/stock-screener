@@ -164,16 +164,27 @@ def research_materials_us(req: TriggerRequest,
 def test_cron_secret(req: TriggerRequest,
                      x_cron_secret: Optional[str] = Header(None),
                      authorization: Optional[str] = Header(None)):
-    """CRON_SECRET接続テスト用エンドポイント (Web UIから設定確認可能)"""
+    """CRON_SECRET接続テスト用エンドポイント (Web UIから設定確認可能)
+
+    レスポンスコード:
+        200 = secret一致
+        403 = secret不一致
+        503 = Render ENVにCRON_SECRET未設定 (Render Dashboard で設定が必要)
+    """
     required = os.getenv("CRON_SECRET", "")
     if not required:
-        return {"status": "cron_secret_not_set", "message": "Render側のCRON_SECRETが未設定です"}
+        raise HTTPException(503, "Render ENV CRON_SECRET not configured. Set it in Render Dashboard → Environment.")
     provided = x_cron_secret or ""
     if not provided and authorization and authorization.lower().startswith("bearer "):
         provided = authorization[7:]
     if provided != required:
-        raise HTTPException(403, "invalid CRON_SECRET")
-    return {"status": "ok", "message": "CRON_SECRETが正しく設定されています"}
+        raise HTTPException(403, "invalid CRON_SECRET (Render ENVとheaderの値が不一致)")
+    return {
+        "status": "ok",
+        "message": "CRON_SECRETが一致しました",
+        "cron_secret_env_configured": True,
+        "cron_secret_effective_configured": True,
+    }
 
 
 @router.get("/next-runs")
