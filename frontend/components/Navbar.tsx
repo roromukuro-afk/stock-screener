@@ -18,6 +18,8 @@ const navItems = [
   { href: "/automation", label: "⚙️ 自動化" },
   { href: "/learning-center", label: "🧠 学習センター" },
   { href: "/ai-analyst", label: "🤖 AI総合分析" },
+  { href: "/surge-20-candidates", label: "🌅 20%到達候補" },
+  { href: "/surge-ranking-import", label: "📊 急騰ランキング" },
   { href: "/prediction-review", label: "🔁 予測検証" },
   { href: "/aar", label: "AAR出力" },
   { href: "/backtest", label: "バックテスト" },

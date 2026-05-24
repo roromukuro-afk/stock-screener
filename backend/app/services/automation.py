@@ -239,6 +239,67 @@ def run_full_daily_pipeline(market: str = "JP", trigger_type: str = "cron") -> D
     return {"status": "ok", "market": market, "pipeline": results}
 
 
+# ===== surge_20 ジョブ =====
+def run_surge_20_daily(market: str = "JP", trigger_type: str = "cron", max_symbols: int = 100) -> Dict:
+    """日次 surge_20 パイプライン: ランキング生成 → イベント検出 → pre_features抽出"""
+    from app.services import surge_20
+    job_id = _create_job("surge-20-daily", market, trigger_type)
+    try:
+        rankings = surge_20.generate_all_rankings(market=market, top_n=50)
+        events = surge_20.detect_events_for_universe(market=market, max_symbols=max_symbols)
+        features = surge_20.extract_pre_features_for_recent_events(limit=100)
+        _finish_job(job_id, "completed",
+                    total_symbols=events.get("universe_size", 0),
+                    detected_surge_count=events.get("events_saved_new", 0),
+                    training_cases_created=features.get("features_created", 0))
+        return {"status": "ok", "job_id": job_id,
+                "rankings": rankings, "events": events, "features": features}
+    except Exception as e:
+        _log_error(job_id, "", "surge_20_daily", e)
+        _finish_job(job_id, "failed", error_message=str(e))
+        return {"status": "failed", "error": str(e)}
+
+
+def run_one_day_surge_detection(market: str = "JP", trigger_type: str = "cron", max_symbols: int = 150) -> Dict:
+    """1日急騰のみを高速検出"""
+    from app.services import surge_20, universe_db
+    job_id = _create_job("one-day-surge-detection", market, trigger_type)
+    try:
+        syms = universe_db.list_eligible_yahoo_symbols(
+            markets=[market], max_count=max_symbols, include_adr=True
+        )
+        events = []
+        for s in syms:
+            try:
+                events.extend(surge_20.detect_one_day_surges(s["yahoo_symbol"], s.get("market") or market))
+            except Exception as e:
+                _log_error(job_id, s["yahoo_symbol"], "one_day_surge_detect", e)
+        saved = surge_20._save_surge_events(events, source_type="detected_from_ohlcv")
+        _finish_job(job_id, "completed",
+                    total_symbols=len(syms),
+                    detected_surge_count=saved)
+        return {"status": "ok", "job_id": job_id, "events_detected": len(events), "saved": saved}
+    except Exception as e:
+        _log_error(job_id, "", "one_day_surge_detection", e)
+        _finish_job(job_id, "failed", error_message=str(e))
+        return {"status": "failed", "error": str(e)}
+
+
+def run_surge_20_candidate_build(market: str = "JP", trigger_type: str = "cron", max_symbols: int = 200) -> Dict:
+    from app.services import surge_20
+    job_id = _create_job("surge-20-candidate-build", market, trigger_type)
+    try:
+        r = surge_20.build_candidates(market=market, max_symbols=max_symbols)
+        _finish_job(job_id, "completed",
+                    total_symbols=r.get("universe_scanned", 0),
+                    detected_surge_count=r.get("candidates_count", 0))
+        return {"status": "ok", "job_id": job_id, **r}
+    except Exception as e:
+        _log_error(job_id, "", "surge_20_candidate_build", e)
+        _finish_job(job_id, "failed", error_message=str(e))
+        return {"status": "failed", "error": str(e)}
+
+
 # ===== サマリ =====
 def get_automation_status() -> Dict:
     from zoneinfo import ZoneInfo

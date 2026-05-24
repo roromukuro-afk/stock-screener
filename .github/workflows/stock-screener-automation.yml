@@ -32,6 +32,12 @@ on:
           - run-training-builder-smallcap
           - run-full-daily-pipeline-jp
           - run-full-daily-pipeline-us
+          - run-surge-20-daily-jp
+          - run-surge-20-daily-us
+          - run-one-day-surge-detection-jp
+          - run-one-day-surge-detection-us
+          - run-surge-20-candidate-build
+          - run-surge-ranking-generation
 
 jobs:
   automate:
@@ -261,6 +267,54 @@ jobs:
             -d '{"market":"US","trigger_type":"manual"}' \
             -w "\nHTTP %{http_code}\n" \
             "$BACKEND_URL/api/automation/run-full-daily-pipeline"
+
+      - name: Manual - surge-20 daily jp
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-surge-20-daily-jp'
+        run: |
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"manual","max_symbols":100}' \
+            -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-surge-20-daily"
+
+      - name: Manual - surge-20 daily us
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-surge-20-daily-us'
+        run: |
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"US","trigger_type":"manual","max_symbols":100}' \
+            -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-surge-20-daily"
+
+      - name: Manual - one day surge detection jp
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-one-day-surge-detection-jp'
+        run: |
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"manual","max_symbols":200}' \
+            -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-one-day-surge-detection"
+
+      - name: Manual - one day surge detection us
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-one-day-surge-detection-us'
+        run: |
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"US","trigger_type":"manual","max_symbols":200}' \
+            -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-one-day-surge-detection"
+
+      - name: Manual - surge-20 candidate build
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-surge-20-candidate-build'
+        run: |
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"manual","max_symbols":200}' \
+            -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-surge-20-candidate-build"
+
+      - name: Manual - surge ranking generation
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-surge-ranking-generation'
+        run: |
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"manual"}' \
+            -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-surge-ranking-generation"
 
       - name: Report status after run
         if: always()

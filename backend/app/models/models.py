@@ -388,6 +388,132 @@ class PatternLibrary(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class SurgeRankingSnapshot(Base):
+    __tablename__ = "surge_ranking_snapshots"
+    id = Column(Integer, primary_key=True, index=True)
+    ranking_type = Column(String, index=True)  # one_day_gain / three_day_gain / ... / custom_uploaded_ranking
+    market = Column(String, index=True)
+    snapshot_date = Column(String, index=True)
+    source_name = Column(String)
+    source_url = Column(Text)
+    auto_generated = Column(Boolean, default=True)
+    imported_by_user = Column(Boolean, default=False)
+    total_items = Column(Integer, default=0)
+    calculation_method = Column(String)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class SurgeRankingItem(Base):
+    __tablename__ = "surge_ranking_items"
+    id = Column(Integer, primary_key=True, index=True)
+    snapshot_id = Column(Integer, index=True)
+    symbol = Column(String, index=True)
+    yahoo_symbol = Column(String)
+    name = Column(String)
+    market = Column(String)
+    rank = Column(Integer)
+    current_price = Column(Float)
+    start_price = Column(Float)
+    calculated_gain_percent = Column(Float)
+    imported_gain_percent = Column(Float)
+    gain_percent_diff = Column(Float)
+    gain_amount = Column(Float)
+    market_cap = Column(Float)
+    volume = Column(Float)
+    turnover = Column(Float)
+    locked_flag = Column(Boolean, default=False)
+    verified_by_ohlcv = Column(Boolean, default=False)
+    verification_warning = Column(Text)
+    captured_at = Column(String)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class Surge20Event(Base):
+    __tablename__ = "surge_20_events"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)
+    yahoo_symbol = Column(String)
+    name = Column(String)
+    market = Column(String, index=True)
+    event_type = Column(String, index=True)
+    # one_day_surge_20 / one_day_intraday_surge_20 / hit_20_within_3d /
+    # hit_20_within_5d / hit_20_within_10d / hit_20_within_20d /
+    # hit_20_within_1m / continuation_surge / pullback_reentry_surge /
+    # late_chase_only
+    event_start_date = Column(String, index=True)
+    event_end_date = Column(String)
+    days_to_hit_20 = Column(Integer)
+    start_price = Column(Float)
+    max_price = Column(Float)
+    hit_20_date = Column(String)
+    max_gain_percent = Column(Float)
+    max_drawdown_before_hit = Column(Float)
+    source_type = Column(String)  # detected_from_ohlcv / auto_generated_ranking / imported_from_ranking
+    source_snapshot_id = Column(Integer)
+    material_confirmed = Column(Boolean, default=False)
+    catalyst_category = Column(String)
+    entry_viability_label = Column(String)
+    chase_warning = Column(Boolean, default=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class Surge20PreFeature(Base):
+    __tablename__ = "surge_20_pre_features"
+    id = Column(Integer, primary_key=True, index=True)
+    surge_event_id = Column(Integer, index=True)
+    symbol = Column(String, index=True)
+    market = Column(String)
+    asof_date = Column(String)
+    relative_day = Column(String, index=True)  # T-20 / T-10 / T-5 / T-3 / T-1 / T0
+    close = Column(Float)
+    price_change_1d = Column(Float)
+    price_change_3d = Column(Float)
+    price_change_5d = Column(Float)
+    price_change_10d = Column(Float)
+    price_change_20d = Column(Float)
+    volume_ratio_5d = Column(Float)
+    volume_ratio_20d = Column(Float)
+    turnover = Column(Float)
+    ma5 = Column(Float)
+    ma25 = Column(Float)
+    ma75 = Column(Float)
+    ma200 = Column(Float)
+    ma25_deviation = Column(Float)
+    support_line = Column(Float)
+    resistance_line = Column(Float)
+    support_distance = Column(Float)
+    resistance_upside = Column(Float)
+    range_position = Column(Float)
+    high_close_flag = Column(Boolean, default=False)
+    breakout_flag = Column(Boolean, default=False)
+    squeeze_flag = Column(Boolean, default=False)
+    reaccumulation_flag = Column(Boolean, default=False)
+    selling_exhaustion_flag = Column(Boolean, default=False)
+    pre_breakout_flag = Column(Boolean, default=False)
+    material_confirmed = Column(Boolean, default=False)
+    catalyst_category = Column(String)
+    catalyst_quality_score = Column(Float)
+    theme_score = Column(Float)
+    liquidity_score = Column(Float)
+    overextension_score = Column(Float)
+    entry_viability_score = Column(Float)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class Surge20NegativeCase(Base):
+    __tablename__ = "surge_20_negative_cases"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)
+    market = Column(String)
+    asof_date = Column(String)
+    reason = Column(String, index=True)
+    similar_positive_event_id = Column(Integer)
+    max_gain_next_20d = Column(Float)
+    hit_20_next_20d = Column(Boolean, default=False)
+    failure_reason = Column(Text)
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class ModelVersion(Base):
     __tablename__ = "model_versions"
     id = Column(Integer, primary_key=True, index=True)
@@ -685,6 +811,13 @@ class PredictionLog(Base):
     resistance_line = Column(Float)
     ma25_deviation = Column(Float)
     status = Column(String, default="open", index=True)  # open / reviewed / closed
+    # 予測タイプ (default: tomorrow_prediction で後方互換)
+    prediction_type = Column(String, index=True, default="tomorrow_prediction")
+    # tomorrow_prediction / surge_20_prediction / continuation_prediction /
+    # pullback_reentry_prediction / one_day_surge_prediction / material_reaction_prediction
+    prediction_horizon = Column(String, default="next_day")
+    # next_day / within_3d / within_5d / within_10d / within_20d / within_1m
+    target_return = Column(Float, default=20.0)  # 目標到達率 (%)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

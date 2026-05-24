@@ -204,6 +204,49 @@ def next_runs():
     return {"now_utc": now.isoformat(), "schedules": schedules}
 
 
+@router.post("/run-surge-20-daily")
+def run_surge_20_daily(req: TriggerRequest,
+                       x_cron_secret: Optional[str] = Header(None),
+                       authorization: Optional[str] = Header(None)):
+    _check_secret(x_cron_secret, authorization)
+    _run_async(automation.run_surge_20_daily,
+               req.market or "JP", req.trigger_type or "cron",
+               req.max_symbols or 100)
+    return {"status": "started", "job_type": "surge-20-daily"}
+
+
+@router.post("/run-one-day-surge-detection")
+def run_one_day_surge_detection(req: TriggerRequest,
+                                x_cron_secret: Optional[str] = Header(None),
+                                authorization: Optional[str] = Header(None)):
+    _check_secret(x_cron_secret, authorization)
+    _run_async(automation.run_one_day_surge_detection,
+               req.market or "JP", req.trigger_type or "cron",
+               req.max_symbols or 150)
+    return {"status": "started", "job_type": "one-day-surge-detection"}
+
+
+@router.post("/run-surge-20-candidate-build")
+def run_surge_20_candidate_build(req: TriggerRequest,
+                                  x_cron_secret: Optional[str] = Header(None),
+                                  authorization: Optional[str] = Header(None)):
+    _check_secret(x_cron_secret, authorization)
+    _run_async(automation.run_surge_20_candidate_build,
+               req.market or "JP", req.trigger_type or "cron",
+               req.max_symbols or 200)
+    return {"status": "started", "job_type": "surge-20-candidate-build"}
+
+
+@router.post("/run-surge-ranking-generation")
+def run_surge_ranking_generation(req: TriggerRequest,
+                                  x_cron_secret: Optional[str] = Header(None),
+                                  authorization: Optional[str] = Header(None)):
+    _check_secret(x_cron_secret, authorization)
+    from app.services import surge_20
+    _run_async(surge_20.generate_all_rankings, req.market or "JP", None, 100)
+    return {"status": "started", "job_type": "surge-ranking-generation"}
+
+
 @router.post("/run-full-daily-pipeline")
 def run_full_pipeline(req: TriggerRequest,
                       x_cron_secret: Optional[str] = Header(None),
