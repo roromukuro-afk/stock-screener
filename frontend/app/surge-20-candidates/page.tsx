@@ -64,13 +64,41 @@ export default function Surge20CandidatesPage() {
       </div>
 
       {summary && (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
-          <div className="card p-3"><p className="text-xs text-gray-500">surge_20_events</p><p className="text-2xl font-bold text-emerald-700">{summary.surge_20_events}</p></div>
-          <div className="card p-3"><p className="text-xs text-gray-500">pre_features</p><p className="text-2xl font-bold text-blue-600">{summary.pre_features}</p></div>
-          <div className="card p-3"><p className="text-xs text-gray-500">ranking_snapshots</p><p className="text-2xl font-bold text-purple-600">{summary.ranking_snapshots}</p></div>
-          <div className="card p-3"><p className="text-xs text-gray-500">ranking_items</p><p className="text-2xl font-bold text-gray-700">{summary.ranking_items}</p></div>
-          <div className="card p-3"><p className="text-xs text-gray-500">negative_cases</p><p className="text-2xl font-bold text-red-500">{summary.negative_cases}</p></div>
-        </div>
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 text-sm">
+            <div className="card p-3"><p className="text-xs text-gray-500">surge_20_events</p><p className="text-2xl font-bold text-emerald-700">{summary.surge_20_events}</p><p className="text-xs text-gray-400">{summary.unique_symbols_with_events || 0} unique</p></div>
+            <div className="card p-3"><p className="text-xs text-gray-500">pre_features</p><p className="text-2xl font-bold text-blue-600">{summary.pre_features}</p><p className="text-xs text-gray-400">{summary.unique_symbols_with_features || 0} unique</p></div>
+            <div className="card p-3"><p className="text-xs text-gray-500">negative_cases</p><p className="text-2xl font-bold text-red-500">{summary.negative_cases}</p></div>
+            <div className="card p-3"><p className="text-xs text-gray-500">P/N ratio (neg/events)</p><p className="text-2xl font-bold text-orange-600">{summary.positive_negative_ratio ?? "-"}</p></div>
+            <div className="card p-3"><p className="text-xs text-gray-500">ranking_snapshots</p><p className="text-2xl font-bold text-purple-600">{summary.ranking_snapshots}</p></div>
+            <div className="card p-3"><p className="text-xs text-gray-500">ranking_items</p><p className="text-2xl font-bold text-gray-700">{summary.ranking_items}</p></div>
+            <div className="card p-3"><p className="text-xs text-gray-500">recent snapshots</p><p className="text-2xl font-bold text-cyan-600">{(summary.recent_snapshots || []).length}</p></div>
+          </div>
+          {summary.events_by_type && Object.keys(summary.events_by_type).length > 0 && (
+            <div className="card p-3">
+              <p className="text-xs font-bold text-gray-700 mb-2">event_type別件数</p>
+              <div className="flex flex-wrap gap-2 text-xs">
+                {Object.entries(summary.events_by_type).map(([k, v]: [string, any]) => (
+                  <span key={k} className="px-2 py-1 rounded bg-emerald-50 border border-emerald-200 text-emerald-700">
+                    {k}: <strong>{v}</strong>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {summary.negative_cases_by_reason && Object.keys(summary.negative_cases_by_reason).length > 0 && (
+            <div className="card p-3">
+              <p className="text-xs font-bold text-gray-700 mb-2">negative_cases by failure_reason</p>
+              <div className="flex flex-wrap gap-2 text-xs">
+                {Object.entries(summary.negative_cases_by_reason).map(([k, v]: [string, any]) => (
+                  <span key={k} className="px-2 py-1 rounded bg-red-50 border border-red-200 text-red-700">
+                    {k}: <strong>{v}</strong>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       <div className="card p-5">
