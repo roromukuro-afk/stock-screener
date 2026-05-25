@@ -6,6 +6,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.services import surge_20
+from app.services.surge_20 import (
+    detect_one_day_surges, detect_multi_day_hit_20,
+    _save_surge_events, extract_pre_features_for_recent_events,
+    generate_negative_cases_for_symbol,
+)
 from app.utils import clean_for_json
 
 
@@ -243,3 +248,145 @@ def get_candidates(market: str = "JP", max_symbols: int = 100):
 @router.get("/summary")
 def summary():
     return clean_for_json(surge_20.get_summary())
+
+
+# ============== Training data expansion ==============
+class ExpandTrainingRequest(BaseModel):
+    market: str = "JP"
+    max_symbols: int = 300
+    chunk_size: int = 30
+    start_offset: int = 0
+    priority_mode: str = "known_surge_first"
+    # known_surge_first / smallcap_first / growth_market_first /
+    # low_price_first / high_volume_first / all_eligible
+    generate_negative_cases: bool = True
+    extract_features_limit: int = 200
+    async_mode: bool = True
+
+
+def _select_priority_universe(priority_mode: str, market: str, max_symbols: int, start_offset: int) -> List[Dict]:
+    """priority_mode に応じて universe を選定"""
+    from app.services import universe_db
+    from app.services.training_builder import KNOWN_SURGE_SEED_JP, KNOWN_SURGE_SEED_US
+
+    if priority_mode == "known_surge_first":
+        if market == "JP":
+            seed = [{"symbol": s, "yahoo_symbol": s, "name": s, "market": "JP"} for s in KNOWN_SURGE_SEED_JP]
+        elif market == "US":
+            seed = [{"symbol": s, "yahoo_symbol": s, "name": s, "market": "US"} for s in KNOWN_SURGE_SEED_US]
+        else:
+            seed = ([{"symbol": s, "yahoo_symbol": s, "name": s, "market": "JP"} for s in KNOWN_SURGE_SEED_JP] +
+                    [{"symbol": s, "yahoo_symbol": s, "name": s, "market": "US"} for s in KNOWN_SURGE_SEED_US])
+        # seedの後に通常universe
+        rest = universe_db.list_eligible_yahoo_symbols(markets=[market] if market != "ALL" else ["JP", "US"],
+                                                       max_count=0, include_adr=True)
+        seed_set = {x["symbol"] for x in seed}
+        rest_filtered = [x for x in rest if x["symbol"] not in seed_set]
+        combined = seed + rest_filtered
+        return combined[start_offset: start_offset + max_symbols]
+
+    if priority_mode == "smallcap_first":
+        all_syms = universe_db.list_eligible_yahoo_symbols(
+            markets=[market] if market != "ALL" else ["JP", "US"], max_count=0, include_adr=True
+        )
+        # 5桁以下の小型株を優先
+        small = [s for s in all_syms if len(s.get("symbol", "").split(".")[0]) <= 5]
+        return small[start_offset: start_offset + max_symbols]
+
+    # default: all_eligible
+    return universe_db.list_eligible_yahoo_symbols(
+        markets=[market] if market != "ALL" else ["JP", "US"],
+        max_count=max_symbols + start_offset, include_adr=True,
+    )[start_offset: start_offset + max_symbols]
+
+
+def _expand_training_sync(req_dict: Dict):
+    """chunk処理で training データを拡張"""
+    market = req_dict.get("market", "JP")
+    max_symbols = req_dict.get("max_symbols", 300)
+    chunk_size = req_dict.get("chunk_size", 30)
+    start_offset = req_dict.get("start_offset", 0)
+    priority_mode = req_dict.get("priority_mode", "known_surge_first")
+    do_negative = req_dict.get("generate_negative_cases", True)
+    extract_limit = req_dict.get("extract_features_limit", 200)
+
+    syms = _select_priority_universe(priority_mode, market, max_symbols, start_offset)
+    print(f"[expand-training] {priority_mode} → {len(syms)} symbols (offset={start_offset})")
+
+    # chunk処理
+    total_events = 0
+    total_features = 0
+    total_negatives = 0
+    for chunk_start in range(0, len(syms), chunk_size):
+        chunk = syms[chunk_start: chunk_start + chunk_size]
+        chunk_events = []
+        for s in chunk:
+            sym = s["yahoo_symbol"]
+            mk = s.get("market") or market
+            try:
+                chunk_events.extend(detect_one_day_surges(sym, mk))
+                chunk_events.extend(detect_multi_day_hit_20(sym, mk))
+            except Exception as e:
+                print(f"detect failed {sym}: {e}")
+        saved = _save_surge_events(chunk_events, source_type="detected_from_ohlcv")
+        total_events += saved
+        # 各chunk後 extract pre_features
+        try:
+            fres = extract_pre_features_for_recent_events(limit=extract_limit)
+            total_features += fres.get("features_created", 0)
+        except Exception as e:
+            print(f"extract features chunk failed: {e}")
+        # negative case生成
+        if do_negative:
+            for s in chunk:
+                try:
+                    n = generate_negative_cases_for_symbol(
+                        s["yahoo_symbol"], s.get("market") or market, max_cases=15
+                    )
+                    total_negatives += n
+                except Exception as e:
+                    print(f"neg gen failed {s.get('symbol')}: {e}")
+        print(f"[expand-training chunk {chunk_start//chunk_size+1}] events_saved={saved} features={total_features} negatives={total_negatives}")
+
+    print(f"[expand-training DONE] events={total_events} features={total_features} negatives={total_negatives}")
+
+
+@router.post("/expand-training")
+def expand_training(req: ExpandTrainingRequest):
+    """chunk処理で大規模拡張 (常にasync推奨)"""
+    if req.async_mode:
+        t = threading.Thread(target=_expand_training_sync, args=(req.model_dump(),), daemon=True)
+        t.start()
+        return {
+            "status": "started",
+            "message": f"教師データ拡張をbackgroundで開始 (market={req.market}, max={req.max_symbols}, chunk={req.chunk_size}, priority={req.priority_mode})",
+            "note": "/api/surge-20/summary で進捗確認",
+        }
+    _expand_training_sync(req.model_dump())
+    return clean_for_json(surge_20.get_summary())
+
+
+# ============== negative生成単独 ==============
+class NegativeGenRequest(BaseModel):
+    market: str = "JP"
+    max_symbols: int = 100
+    max_per_symbol: int = 20
+    async_mode: bool = True
+
+
+@router.post("/generate-negative-cases")
+def generate_negative_cases(req: NegativeGenRequest):
+    if req.async_mode:
+        t = threading.Thread(
+            target=surge_20.generate_negative_cases_for_universe,
+            args=(req.market, req.max_symbols, req.max_per_symbol),
+            daemon=True,
+        )
+        t.start()
+        return {"status": "started", "message": f"negative case生成をbackgroundで開始 (market={req.market}, max={req.max_symbols})"}
+    return clean_for_json(surge_20.generate_negative_cases_for_universe(req.market, req.max_symbols, req.max_per_symbol))
+
+
+@router.post("/consolidate-duplicates")
+def consolidate_duplicates(min_gap_days: int = 5):
+    return clean_for_json(surge_20.consolidate_duplicate_events(min_gap_days=min_gap_days))

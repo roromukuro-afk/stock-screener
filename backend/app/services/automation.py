@@ -285,6 +285,80 @@ def run_one_day_surge_detection(market: str = "JP", trigger_type: str = "cron", 
         return {"status": "failed", "error": str(e)}
 
 
+def run_surge_20_expand_training(market: str = "JP", trigger_type: str = "cron",
+                                  max_symbols: int = 300, chunk_size: int = 30,
+                                  start_offset: int = 0,
+                                  priority_mode: str = "known_surge_first") -> Dict:
+    """大規模な教師データ拡張 — chunk処理 + negative生成"""
+    from app.services.surge_20 import (
+        detect_one_day_surges, detect_multi_day_hit_20, _save_surge_events,
+        extract_pre_features_for_recent_events, generate_negative_cases_for_symbol,
+    )
+    from app.services import universe_db
+    from app.services.training_builder import KNOWN_SURGE_SEED_JP, KNOWN_SURGE_SEED_US
+
+    job_id = _create_job(f"surge-20-expand/{priority_mode}", market, trigger_type)
+    try:
+        # universe選定
+        if priority_mode == "known_surge_first":
+            if market == "JP":
+                seed = [{"symbol": s, "yahoo_symbol": s, "market": "JP"} for s in KNOWN_SURGE_SEED_JP]
+            elif market == "US":
+                seed = [{"symbol": s, "yahoo_symbol": s, "market": "US"} for s in KNOWN_SURGE_SEED_US]
+            else:
+                seed = []
+            rest = universe_db.list_eligible_yahoo_symbols(
+                markets=[market], max_count=0, include_adr=True
+            )
+            seed_set = {x["symbol"] for x in seed}
+            combined = seed + [x for x in rest if x["symbol"] not in seed_set]
+            syms = combined[start_offset: start_offset + max_symbols]
+        else:
+            syms = universe_db.list_eligible_yahoo_symbols(
+                markets=[market], max_count=max_symbols + start_offset, include_adr=True
+            )[start_offset: start_offset + max_symbols]
+
+        total_events = 0; total_features = 0; total_negatives = 0
+        for chunk_start in range(0, len(syms), chunk_size):
+            chunk = syms[chunk_start: chunk_start + chunk_size]
+            events = []
+            for s in chunk:
+                try:
+                    events.extend(detect_one_day_surges(s["yahoo_symbol"], s.get("market") or market))
+                    events.extend(detect_multi_day_hit_20(s["yahoo_symbol"], s.get("market") or market))
+                except Exception as e:
+                    _log_error(job_id, s["yahoo_symbol"], "detect", e)
+            saved = _save_surge_events(events, source_type="detected_from_ohlcv")
+            total_events += saved
+            try:
+                f = extract_pre_features_for_recent_events(limit=200)
+                total_features += f.get("features_created", 0)
+            except Exception as e:
+                _log_error(job_id, "", "extract_features", e)
+            for s in chunk:
+                try:
+                    total_negatives += generate_negative_cases_for_symbol(
+                        s["yahoo_symbol"], s.get("market") or market, max_cases=15
+                    )
+                except Exception as e:
+                    _log_error(job_id, s.get("symbol"), "neg_gen", e)
+
+        _finish_job(job_id, "completed",
+                    total_symbols=len(syms),
+                    detected_surge_count=total_events,
+                    positive_cases_created=total_features,
+                    negative_cases_created=total_negatives)
+        return {"status": "ok", "job_id": job_id,
+                "symbols_processed": len(syms),
+                "events_saved": total_events,
+                "features_created": total_features,
+                "negatives_created": total_negatives}
+    except Exception as e:
+        _log_error(job_id, "", "expand_training", e)
+        _finish_job(job_id, "failed", error_message=str(e))
+        return {"status": "failed", "error": str(e)}
+
+
 def run_surge_20_candidate_build(market: str = "JP", trigger_type: str = "cron", max_symbols: int = 200) -> Dict:
     from app.services import surge_20
     job_id = _create_job("surge-20-candidate-build", market, trigger_type)

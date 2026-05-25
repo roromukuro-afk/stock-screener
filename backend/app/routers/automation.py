@@ -226,6 +226,18 @@ def run_one_day_surge_detection(req: TriggerRequest,
     return {"status": "started", "job_type": "one-day-surge-detection"}
 
 
+@router.post("/run-surge-20-expand-training")
+def run_surge_20_expand_training(req: TriggerRequest,
+                                  x_cron_secret: Optional[str] = Header(None),
+                                  authorization: Optional[str] = Header(None)):
+    _check_secret(x_cron_secret, authorization)
+    # TriggerRequestに priority_mode などはないので、デフォルト known_surge_first
+    _run_async(automation.run_surge_20_expand_training,
+               req.market or "JP", req.trigger_type or "cron",
+               req.max_symbols or 300, 30, 0, "known_surge_first")
+    return {"status": "started", "job_type": "surge-20-expand-training"}
+
+
 @router.post("/run-surge-20-candidate-build")
 def run_surge_20_candidate_build(req: TriggerRequest,
                                   x_cron_secret: Optional[str] = Header(None),

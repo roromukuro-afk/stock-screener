@@ -38,6 +38,9 @@ on:
           - run-one-day-surge-detection-us
           - run-surge-20-candidate-build
           - run-surge-ranking-generation
+          - run-surge-20-expand-training-jp
+          - run-surge-20-expand-training-us
+          - consolidate-surge-20-duplicates
 
 jobs:
   automate:
@@ -307,6 +310,29 @@ jobs:
             -d '{"market":"JP","trigger_type":"manual","max_symbols":200}' \
             -w "\nHTTP %{http_code}\n" \
             "$BACKEND_URL/api/automation/run-surge-20-candidate-build"
+
+      - name: Manual - surge-20 expand training (JP)
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-surge-20-expand-training-jp'
+        run: |
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"manual","max_symbols":300}' \
+            -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-surge-20-expand-training"
+
+      - name: Manual - surge-20 expand training (US)
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-surge-20-expand-training-us'
+        run: |
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"US","trigger_type":"manual","max_symbols":100}' \
+            -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-surge-20-expand-training"
+
+      - name: Manual - consolidate surge-20 duplicates
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'consolidate-surge-20-duplicates'
+        run: |
+          curl -fsS -X POST -H "Content-Type: application/json" \
+            -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/surge-20/consolidate-duplicates?min_gap_days=5"
 
       - name: Manual - surge ranking generation
         if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-surge-ranking-generation'

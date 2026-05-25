@@ -469,6 +469,206 @@ def extract_pre_features_for_recent_events(limit: int = 100) -> Dict:
     return {"status": "ok", "processed_events": len(event_ids), "features_created": total_saved}
 
 
+# ============== negative case生成 ==============
+def generate_negative_cases_for_symbol(symbol: str, market: str, max_cases: int = 30) -> int:
+    """positiveに類似(出来高増/ブレイク気配)なのに+20%未達のケースを生成"""
+    df = _list_history(symbol)
+    if df is None or len(df) < 80:
+        return 0
+    df = df.sort_values("date").reset_index(drop=True)
+
+    db = SessionLocal()
+    try:
+        # 既存surge event_start_dateを取得 (positive近傍を避ける)
+        positive_dates = {
+            d[0] for d in db.query(Surge20Event.event_start_date)
+            .filter(Surge20Event.symbol == symbol).all()
+        }
+    finally:
+        db.close()
+
+    closes = df["close"].astype(float).values
+    highs = df["high"].astype(float).values
+    volumes = df["volume"].astype(float).values
+
+    cases = []
+    # 30日おきにサンプリング、最低60日経過
+    for i in range(60, len(closes) - 22, 30):
+        date_str = str(df.iloc[i]["date"])
+        # positive近傍 (±5営業日) はスキップ
+        skip = False
+        for pd_str in positive_dates:
+            if abs((datetime.strptime(date_str, "%Y-%m-%d") - datetime.strptime(pd_str, "%Y-%m-%d")).days) < 5:
+                skip = True
+                break
+        if skip:
+            continue
+
+        # T-1相当特徴量
+        try:
+            feats = training_builder._calc_t1_features(df, i)
+        except Exception:
+            continue
+        if not feats:
+            continue
+
+        # positiveっぽい兆候があるか
+        is_breakout_like = (
+            bool(feats.get("pre_breakout_flag")) or
+            bool(feats.get("prior_big_volume_flag")) or
+            (feats.get("volume_ratio_20d") or 0) >= 1.5 or
+            (feats.get("range_position") or 0) >= 0.8
+        )
+        if not is_breakout_like:
+            continue
+
+        # T+1〜T+20で+20%到達したか
+        window_highs = highs[i + 1: i + 21]
+        try:
+            window_highs = [float(h) for h in window_highs if not math.isnan(float(h))]
+        except Exception:
+            window_highs = []
+        if not window_highs:
+            continue
+        base = float(closes[i])
+        if base <= 0:
+            continue
+        max_hi = max(window_highs)
+        max_gain = (max_hi - base) / base * 100
+        if max_gain >= 20.0:
+            continue  # positiveなのでスキップ
+        hit_20 = False
+
+        # failure_reason 推定
+        overext = feats.get("overextension_score") or 0
+        upside = feats.get("resistance_upside") or 0
+        pc5 = feats.get("price_change_5d") or 0
+        vol_r = feats.get("volume_ratio_20d") or 0
+        liquidity = feats.get("liquidity_score") or 0
+
+        if overext >= 60 or pc5 >= 30:
+            reason = "overextended"
+        elif upside < 10:
+            reason = "resistance_too_close"
+        elif vol_r >= 2.0 and max_gain < 5:
+            reason = "volume_spike_failed"
+        elif liquidity < 30:
+            reason = "low_liquidity"
+        elif feats.get("pre_breakout_flag") and max_gain < 5:
+            reason = "looked_like_breakout_but_failed"
+        else:
+            reason = "material_weak"
+
+        cases.append({
+            "symbol": symbol, "market": market,
+            "asof_date": date_str,
+            "reason": reason,
+            "max_gain_next_20d": round(max_gain, 3),
+            "hit_20_next_20d": False,
+            "failure_reason": f"max_gain={max_gain:.1f}% overext={overext:.0f} upside={upside:.1f}%",
+        })
+        if len(cases) >= max_cases:
+            break
+
+    # DB保存
+    saved = 0
+    for c in cases:
+        d = SessionLocal()
+        try:
+            existing = (d.query(Surge20NegativeCase)
+                        .filter(Surge20NegativeCase.symbol == c["symbol"])
+                        .filter(Surge20NegativeCase.asof_date == c["asof_date"])
+                        .first())
+            if existing:
+                continue
+            d.add(Surge20NegativeCase(**c))
+            d.commit()
+            saved += 1
+        except Exception as e:
+            d.rollback()
+            print(f"save negative case failed {c['symbol']} {c['asof_date']}: {e}")
+        finally:
+            d.close()
+    return saved
+
+
+def generate_negative_cases_for_universe(market: str = "JP", max_symbols: int = 100,
+                                          max_per_symbol: int = 20) -> Dict:
+    syms = universe_db.list_eligible_yahoo_symbols(
+        markets=[market], max_count=max_symbols, include_adr=True
+    )
+    total = 0
+    for s in syms:
+        try:
+            total += generate_negative_cases_for_symbol(
+                s["yahoo_symbol"], s.get("market") or market, max_cases=max_per_symbol
+            )
+        except Exception as e:
+            print(f"negative gen failed {s['yahoo_symbol']}: {e}")
+    return {"status": "ok", "universe_size": len(syms), "negative_cases_created": total}
+
+
+# ============== 重複整理 ==============
+def consolidate_duplicate_events(min_gap_days: int = 5) -> Dict:
+    """同一symbol で event_start_date が min_gap_days 以内のイベントを整理。
+    優先順位: one_day_surge_20 > hit_20_within_3d > 5d > 10d > 20d > 1m
+    """
+    priority = {
+        "one_day_surge_20": 0,
+        "one_day_intraday_surge_20": 1,
+        "hit_20_within_3d": 2,
+        "hit_20_within_5d": 3,
+        "hit_20_within_10d": 4,
+        "hit_20_within_20d": 5,
+        "hit_20_within_1m": 6,
+    }
+    db = SessionLocal()
+    try:
+        # 銘柄ごとに event を取得
+        symbols = [s[0] for s in db.query(Surge20Event.symbol).distinct().all()]
+        deleted_total = 0
+        for sym in symbols:
+            evs = (db.query(Surge20Event)
+                   .filter(Surge20Event.symbol == sym)
+                   .order_by(Surge20Event.event_start_date).all())
+            if len(evs) < 2:
+                continue
+            # 日付ごとにグループ化 (min_gap_days以内をまとめる)
+            evs_with_dt = []
+            for e in evs:
+                try:
+                    dt = datetime.strptime(e.event_start_date, "%Y-%m-%d")
+                    evs_with_dt.append((dt, e))
+                except Exception:
+                    pass
+            evs_with_dt.sort(key=lambda x: x[0])
+
+            groups = []
+            current_group = [evs_with_dt[0]]
+            for dt, e in evs_with_dt[1:]:
+                if (dt - current_group[-1][0]).days <= min_gap_days:
+                    current_group.append((dt, e))
+                else:
+                    groups.append(current_group)
+                    current_group = [(dt, e)]
+            groups.append(current_group)
+
+            for g in groups:
+                if len(g) < 2:
+                    continue
+                # 優先順位で残すものを選ぶ
+                g.sort(key=lambda x: priority.get(x[1].event_type, 99))
+                keep_id = g[0][1].id
+                for _, e in g[1:]:
+                    if e.id != keep_id:
+                        db.delete(e)
+                        deleted_total += 1
+            db.commit()
+        return {"status": "ok", "deleted_duplicate_events": deleted_total, "symbols_checked": len(symbols)}
+    finally:
+        db.close()
+
+
 # ============== サマリ ==============
 def get_summary() -> Dict:
     db = SessionLocal()
@@ -486,16 +686,33 @@ def get_summary() -> Dict:
               .group_by(Surge20PreFeature.relative_day).all()
         )
         negatives = db.query(Surge20NegativeCase).count()
+        negatives_by_reason = dict(
+            db.query(Surge20NegativeCase.reason, func.count(Surge20NegativeCase.id))
+              .group_by(Surge20NegativeCase.reason).all()
+        )
+        unique_symbols_events = db.query(Surge20Event.symbol).distinct().count()
+        unique_symbols_features = db.query(Surge20PreFeature.symbol).distinct().count()
+        events_by_market = dict(
+            db.query(Surge20Event.market, func.count(Surge20Event.id))
+              .group_by(Surge20Event.market).all()
+        )
+        pos_count = sum(events_by_type.values()) if 'events_by_type' in dir() else events
+        ratio = round(negatives / max(1, pos_count), 3) if pos_count > 0 else None
         recent_snaps = (db.query(SurgeRankingSnapshot)
                         .order_by(SurgeRankingSnapshot.id.desc()).limit(10).all())
         return {
             "ranking_snapshots": snaps,
             "ranking_items": items,
             "surge_20_events": events,
+            "unique_symbols_with_events": unique_symbols_events,
             "events_by_type": events_by_type,
+            "events_by_market": events_by_market,
             "pre_features": pre_feats,
             "pre_features_by_relative_day": pre_feats_by_rel,
+            "unique_symbols_with_features": unique_symbols_features,
             "negative_cases": negatives,
+            "negative_cases_by_reason": negatives_by_reason,
+            "positive_negative_ratio": ratio,
             "recent_snapshots": [
                 {"id": s.id, "ranking_type": s.ranking_type, "market": s.market,
                  "snapshot_date": s.snapshot_date, "total_items": s.total_items,
