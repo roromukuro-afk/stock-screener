@@ -226,6 +226,23 @@ def run_one_day_surge_detection(req: TriggerRequest,
     return {"status": "started", "job_type": "one-day-surge-detection"}
 
 
+@router.post("/review-surge-20-predictions")
+def review_surge_20_predictions(req: TriggerRequest,
+                                 x_cron_secret: Optional[str] = Header(None),
+                                 authorization: Optional[str] = Header(None)):
+    _check_secret(x_cron_secret, authorization)
+    _run_async(automation.review_surge_20_predictions, req.trigger_type or "cron")
+    return {"status": "started", "job_type": "review-surge-20-predictions"}
+
+
+@router.post("/save-surge-20-reviews-as-training")
+def save_surge_20_reviews_as_training(req: TriggerRequest,
+                                       x_cron_secret: Optional[str] = Header(None),
+                                       authorization: Optional[str] = Header(None)):
+    _check_secret(x_cron_secret, authorization)
+    return automation.save_surge_20_reviews_as_training(req.trigger_type or "cron")
+
+
 @router.post("/run-surge-20-expand-training")
 def run_surge_20_expand_training(req: TriggerRequest,
                                   x_cron_secret: Optional[str] = Header(None),

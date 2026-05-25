@@ -32,19 +32,40 @@ export default function PredictionReviewPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string>("");
 
+  const [surge20Perf, setSurge20Perf] = useState<any>(null);
   const load = useCallback(async () => {
     try {
-      const [s, r] = await Promise.all([
+      const [s, r, sp] = await Promise.all([
         fetchAPI("/api/prediction-review/summary"),
         fetchAPI("/api/prediction-review/results?limit=300"),
+        fetchAPI("/api/surge-20/prediction-performance").catch(() => null),
       ]);
       setSummary(s);
       setItems(r.items || []);
+      setSurge20Perf(sp);
       setError(null);
     } catch (e: any) {
       setError(e.message);
     }
   }, []);
+
+  const triggerSurge20Review = async () => {
+    try {
+      await fetchAPI("/api/surge-20/review-predictions?limit=300", { method: "POST", body: "{}" });
+      setTimeout(load, 5000);
+    } catch (e: any) {
+      alert(e.message);
+    }
+  };
+  const saveSurge20Training = async () => {
+    try {
+      const r = await fetchAPI("/api/surge-20/save-reviewed-predictions-as-training", { method: "POST", body: "{}" });
+      alert(`保存: positive=${r.positive_saved} negative=${r.negative_saved}`);
+      load();
+    } catch (e: any) {
+      alert(e.message);
+    }
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -97,6 +118,44 @@ export default function PredictionReviewPage() {
           ⚠️ これは投資助言ではありません。分析・学習・検証目的のツールです。
         </div>
       </div>
+
+      {/* surge_20専用パネル */}
+      {surge20Perf && (
+        <div className="card p-4 border-l-4 border-emerald-400">
+          <h2 className="font-bold text-emerald-800 mb-3">🌅 surge_20_prediction 専用成績</h2>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm mb-3">
+            <div><p className="text-xs text-gray-500">total</p><p className="text-2xl font-bold">{surge20Perf.total_surge_20_predictions}</p></div>
+            <div><p className="text-xs text-gray-500">saved as training</p><p className="text-2xl font-bold text-fuchsia-600">{surge20Perf.saved_as_training}</p></div>
+          </div>
+          {surge20Perf.by_result_label && Object.keys(surge20Perf.by_result_label).length > 0 && (
+            <div className="flex flex-wrap gap-2 text-xs mb-3">
+              {Object.entries(surge20Perf.by_result_label).map(([k, v]: [string, any]) => {
+                const isSuccess = k.includes("success");
+                const isFailed = k.includes("failed") || k.includes("stopped");
+                const isOpen = k === "still_open" || k === "insufficient_days";
+                return (
+                  <span key={k} className={`px-2 py-1 rounded border ${
+                    isSuccess ? "bg-green-50 border-green-300 text-green-700" :
+                    isFailed ? "bg-red-50 border-red-300 text-red-700" :
+                    isOpen ? "bg-gray-50 border-gray-300 text-gray-600" :
+                    "bg-yellow-50 border-yellow-200 text-yellow-700"
+                  }`}>{k}: <strong>{v}</strong></span>
+                );
+              })}
+            </div>
+          )}
+          <div className="flex gap-2">
+            <button onClick={triggerSurge20Review}
+              className="px-4 py-2 bg-emerald-600 text-white rounded text-sm hover:bg-emerald-700">
+              🔁 surge_20 予測を検証
+            </button>
+            <button onClick={saveSurge20Training}
+              className="px-4 py-2 bg-fuchsia-600 text-white rounded text-sm hover:bg-fuchsia-700">
+              🎓 検証結果を教師データへ
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 操作ボタン */}
       <div className="flex flex-wrap gap-2">

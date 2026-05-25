@@ -669,6 +669,90 @@ def consolidate_duplicate_events(min_gap_days: int = 5) -> Dict:
         db.close()
 
 
+# ============== data-quality / orphan処理 ==============
+def get_data_quality() -> Dict:
+    """orphan pre_features / events_with(without)_features / 警告を返す"""
+    db = SessionLocal()
+    try:
+        event_ids = {e[0] for e in db.query(Surge20Event.id).all()}
+        feat_event_ids = [f[0] for f in db.query(Surge20PreFeature.surge_event_id).all()]
+        orphan = [eid for eid in feat_event_ids if eid not in event_ids]
+        orphan_count = len(orphan)
+        total_features = len(feat_event_ids)
+        orphan_ratio = round(orphan_count / max(1, total_features), 4)
+
+        events_with_features = (db.query(Surge20PreFeature.surge_event_id).distinct().count())
+        # events_with_features - orphan count = 有効eventの中で features を持つ件数
+        valid_events_with_features = len({eid for eid in feat_event_ids if eid in event_ids})
+        events_without_features = len(event_ids) - valid_events_with_features
+
+        feats_by_rel = dict(
+            db.query(Surge20PreFeature.relative_day, func.count(Surge20PreFeature.id))
+              .group_by(Surge20PreFeature.relative_day).all()
+        )
+        events_by_type = dict(
+            db.query(Surge20Event.event_type, func.count(Surge20Event.id))
+              .group_by(Surge20Event.event_type).all()
+        )
+        neg_by_reason = dict(
+            db.query(Surge20NegativeCase.reason, func.count(Surge20NegativeCase.id))
+              .group_by(Surge20NegativeCase.reason).all()
+        )
+
+        unique_event_symbols = db.query(Surge20Event.symbol).distinct().count()
+        unique_feature_symbols = db.query(Surge20PreFeature.symbol).distinct().count()
+
+        warnings = []
+        if orphan_count > 0:
+            warnings.append(f"orphan_pre_features: {orphan_count}件 (削除済みevent参照)")
+        if events_without_features > len(event_ids) * 0.5:
+            warnings.append(f"events_without_features: {events_without_features}件 (features抽出未完了)")
+        rel_vals = list(feats_by_rel.values())
+        if rel_vals and (max(rel_vals) - min(rel_vals)) / max(1, max(rel_vals)) > 0.3:
+            warnings.append("relative_day分布が偏っています")
+        neg_count = db.query(Surge20NegativeCase).count()
+        if len(event_ids) > 0 and neg_count / len(event_ids) > 10:
+            warnings.append(f"negative/event 比率が高すぎ ({round(neg_count/len(event_ids),2)})")
+        if len(event_ids) < 50:
+            warnings.append(f"positive event が少ない ({len(event_ids)})")
+
+        return {
+            "surge_20_events": len(event_ids),
+            "pre_features": total_features,
+            "orphan_pre_features": orphan_count,
+            "orphan_pre_feature_ratio": orphan_ratio,
+            "events_with_features": valid_events_with_features,
+            "events_without_features": events_without_features,
+            "features_by_relative_day": feats_by_rel,
+            "events_by_type": events_by_type,
+            "negative_cases": neg_count,
+            "negative_by_reason": neg_by_reason,
+            "unique_event_symbols": unique_event_symbols,
+            "unique_feature_symbols": unique_feature_symbols,
+            "warnings": warnings,
+        }
+    finally:
+        db.close()
+
+
+def cleanup_orphan_pre_features() -> Dict:
+    """削除済みeventを参照するpre_featuresを削除"""
+    db = SessionLocal()
+    try:
+        event_ids = {e[0] for e in db.query(Surge20Event.id).all()}
+        orphan_ids = [f.id for f in db.query(Surge20PreFeature).all()
+                      if f.surge_event_id not in event_ids]
+        if not orphan_ids:
+            return {"status": "ok", "deleted": 0}
+        deleted = (db.query(Surge20PreFeature)
+                   .filter(Surge20PreFeature.id.in_(orphan_ids))
+                   .delete(synchronize_session=False))
+        db.commit()
+        return {"status": "ok", "deleted": deleted}
+    finally:
+        db.close()
+
+
 # ============== サマリ ==============
 def get_summary() -> Dict:
     db = SessionLocal()
@@ -764,6 +848,304 @@ def list_snapshot_items(snapshot_id: int, limit: int = 100) -> List[Dict]:
         db.close()
 
 
+# ============== surge_20_prediction 保存 / 検証 / 教師化 ==============
+def save_candidate_as_prediction(body: Dict) -> Dict:
+    """候補を prediction_logs に surge_20_prediction として保存"""
+    from app.models.models import PredictionLog
+    from datetime import date
+
+    db = SessionLocal()
+    try:
+        sym = body.get("symbol")
+        market = body.get("market") or "JP"
+        if not sym:
+            return {"status": "failed", "error": "symbol required"}
+
+        # 同日重複防止
+        today_str = date.today().isoformat()
+        existing = (db.query(PredictionLog)
+                    .filter(PredictionLog.symbol == sym)
+                    .filter(PredictionLog.prediction_date == today_str)
+                    .filter(PredictionLog.prediction_type == "surge_20_prediction")
+                    .first())
+        if existing:
+            return {"status": "already_exists", "log_id": existing.id}
+
+        row = PredictionLog(
+            symbol=sym, yahoo_symbol=sym,
+            name=body.get("name"),
+            market=market,
+            prediction_date=today_str,
+            current_price_at_prediction=body.get("current_price"),
+            jpy_price_at_prediction=body.get("current_price"),
+            prediction_label=body.get("candidate_label") or "surge_20_candidate",
+            final_prediction_score=body.get("final_surge_20_score") or 0,
+            prediction_type="surge_20_prediction",
+            prediction_horizon=body.get("prediction_horizon") or "within_20d",
+            target_return=body.get("target_return") or 20.0,
+            entry_type="surge_20",
+            entry_zone_a_low=body.get("entry_zone_low"),
+            entry_zone_a_high=body.get("entry_zone_high"),
+            stop_loss_price=body.get("stop_loss"),
+            take_profit_1=body.get("first_target"),
+            take_profit_2=body.get("second_target"),
+            positive_case_similarity=body.get("positive_similarity"),
+            negative_case_similarity=body.get("negative_similarity"),
+            reason_summary=body.get("reason_summary"),
+            avoid_condition=body.get("risk_summary"),
+            matched_past_cases=body.get("similar_past_20_events"),
+            status="open",
+        )
+        db.add(row); db.commit()
+        return {"status": "ok", "log_id": row.id, "prediction_type": "surge_20_prediction"}
+    finally:
+        db.close()
+
+
+def _classify_surge_20_result(predicted_at: str, max_gain: float, max_drawdown: float,
+                              hit_20: bool, stop_loss_hit: bool, elapsed_days: int) -> tuple:
+    """surge_20_prediction 専用判定。result_label と failure_reason を返す"""
+    if elapsed_days < 5:
+        return "still_open", None
+    if elapsed_days < 20 and not hit_20 and not stop_loss_hit:
+        return "insufficient_days", None
+
+    if stop_loss_hit and not hit_20:
+        return "stopped_out", "stopped_out"
+    if hit_20:
+        if elapsed_days <= 5:
+            return "high_quality_success_20_within_5d", None
+        if elapsed_days <= 10:
+            return "success_20_within_10d", None
+        return "success_20_within_20d", None
+    if max_gain >= 15:
+        return "conditional_success_15", None
+    if max_gain >= 10:
+        return "short_reaction_success_10", None
+    return "failed_under_10", "failed_under_10"
+
+
+def review_surge_20_predictions(limit: int = 200) -> Dict:
+    """surge_20_prediction の T+5/T+10/T+20 検証 + result_label保存"""
+    from app.models.models import PredictionLog, PredictionOutcome, PredictionReview
+    from datetime import date, datetime as dt
+
+    db = SessionLocal()
+    try:
+        logs = (db.query(PredictionLog)
+                .filter(PredictionLog.prediction_type == "surge_20_prediction")
+                .limit(limit).all())
+        log_ids = [l.id for l in logs]
+    finally:
+        db.close()
+
+    reviewed_count = 0
+    still_open_count = 0
+    insufficient_count = 0
+    success_count = 0
+    failed_count = 0
+
+    for lid in log_ids:
+        db = SessionLocal()
+        try:
+            log = db.query(PredictionLog).filter(PredictionLog.id == lid).first()
+            if not log:
+                continue
+            df = _list_history(log.symbol)
+            if df is None or len(df) < 5:
+                continue
+            df = df.sort_values("date").reset_index(drop=True)
+            # T0 = prediction_date 以降のデータ
+            future = df[df["date"].astype(str) > log.prediction_date]
+            elapsed = len(future)
+            if elapsed == 0:
+                still_open_count += 1
+                continue
+
+            entry_price = log.current_price_at_prediction or 0
+            if entry_price <= 0:
+                continue
+
+            highs = future["high"].astype(float).values
+            lows = future["low"].astype(float).values
+            max_hi = float(max([float(h) for h in highs if not math.isnan(float(h))]))
+            min_lo = float(min([float(l) for l in lows if not math.isnan(float(l))]))
+            max_gain = (max_hi - entry_price) / entry_price * 100
+            max_dd = (min_lo - entry_price) / entry_price * 100
+            hit_20 = max_gain >= 20.0
+            stop_hit = bool(log.stop_loss_price and min_lo <= log.stop_loss_price)
+
+            result_label, failure_reason = _classify_surge_20_result(
+                log.prediction_date, max_gain, max_dd, hit_20, stop_hit, elapsed
+            )
+
+            # PredictionReview に保存
+            db.query(PredictionReview).filter(PredictionReview.prediction_log_id == lid).delete()
+            rev = PredictionReview(
+                prediction_log_id=lid,
+                symbol=log.symbol,
+                prediction_date=log.prediction_date,
+                review_date=date.today().isoformat(),
+                success_label=result_label,
+                success_score=(95.0 if hit_20 else (60.0 if max_gain >= 15 else (30.0 if max_gain >= 10 else 10.0))),
+                max_gain=round(max_gain, 3),
+                max_drawdown=round(max_dd, 3),
+                hit_20_percent=hit_20,
+                stop_loss_hit=stop_hit,
+                entry_plan_worked=hit_20 or max_gain >= 15,
+                failed_reason_category=failure_reason,
+                ai_review_comment=f"surge_20 review: elapsed={elapsed}d max_gain={max_gain:.2f}% max_dd={max_dd:.2f}% result={result_label}",
+                should_save_as_positive_training=result_label in ("high_quality_success_20_within_5d", "success_20_within_10d", "success_20_within_20d", "conditional_success_15"),
+                should_save_as_negative_training=result_label in ("failed_under_10", "stopped_out", "late_chase_only"),
+                saved_as_training=False,
+            )
+            db.add(rev)
+            if result_label not in ("still_open", "insufficient_days"):
+                log.status = "reviewed"
+            db.commit()
+
+            if result_label == "still_open":
+                still_open_count += 1
+            elif result_label == "insufficient_days":
+                insufficient_count += 1
+            elif "success" in result_label:
+                success_count += 1
+            else:
+                failed_count += 1
+            reviewed_count += 1
+        except Exception as e:
+            db.rollback()
+            print(f"review surge_20 {lid} failed: {e}")
+        finally:
+            db.close()
+
+    return {
+        "status": "ok",
+        "logs_processed": len(log_ids),
+        "reviewed": reviewed_count,
+        "still_open": still_open_count,
+        "insufficient_days": insufficient_count,
+        "success": success_count,
+        "failed": failed_count,
+    }
+
+
+def save_surge_20_reviews_as_training() -> Dict:
+    """review結果をsurge_20_pre_features (positive) または surge_20_negative_cases (negative)に保存"""
+    from app.models.models import PredictionLog, PredictionReview
+
+    db = SessionLocal()
+    try:
+        reviews = (db.query(PredictionReview)
+                   .filter(PredictionReview.saved_as_training == False)
+                   .filter((PredictionReview.should_save_as_positive_training == True) |
+                           (PredictionReview.should_save_as_negative_training == True))
+                   .all())
+        pairs = [(r, db.query(PredictionLog).filter(PredictionLog.id == r.prediction_log_id).first())
+                 for r in reviews]
+    finally:
+        db.close()
+
+    positive_saved = 0
+    negative_saved = 0
+    for rev, log in pairs:
+        if not log or log.prediction_type != "surge_20_prediction":
+            continue
+        try:
+            if rev.should_save_as_positive_training:
+                # positive: surge_20_events + pre_features に追加
+                # 簡易: もう既存eventがある場合スキップ
+                event_db = SessionLocal()
+                try:
+                    existing = (event_db.query(Surge20Event)
+                                .filter(Surge20Event.symbol == log.symbol)
+                                .filter(Surge20Event.event_start_date == log.prediction_date)
+                                .first())
+                    if not existing:
+                        event_db.add(Surge20Event(
+                            symbol=log.symbol, yahoo_symbol=log.symbol,
+                            name=log.name, market=log.market,
+                            event_type="hit_20_within_20d",
+                            event_start_date=log.prediction_date,
+                            start_price=log.current_price_at_prediction,
+                            max_gain_percent=rev.max_gain,
+                            source_type="prediction_review",
+                            material_confirmed=log.material_confirmed,
+                            catalyst_category=log.catalyst_category,
+                        ))
+                        event_db.commit()
+                        positive_saved += 1
+                finally:
+                    event_db.close()
+            elif rev.should_save_as_negative_training:
+                neg_db = SessionLocal()
+                try:
+                    existing = (neg_db.query(Surge20NegativeCase)
+                                .filter(Surge20NegativeCase.symbol == log.symbol)
+                                .filter(Surge20NegativeCase.asof_date == log.prediction_date)
+                                .first())
+                    if not existing:
+                        reason = rev.failed_reason_category or "false_positive_similarity"
+                        neg_db.add(Surge20NegativeCase(
+                            symbol=log.symbol, market=log.market,
+                            asof_date=log.prediction_date,
+                            reason=reason,
+                            max_gain_next_20d=rev.max_gain,
+                            hit_20_next_20d=rev.hit_20_percent,
+                            failure_reason=rev.ai_review_comment,
+                        ))
+                        neg_db.commit()
+                        negative_saved += 1
+                finally:
+                    neg_db.close()
+
+            # mark saved
+            mark_db = SessionLocal()
+            try:
+                r = mark_db.query(PredictionReview).filter(PredictionReview.id == rev.id).first()
+                if r:
+                    r.saved_as_training = True
+                    mark_db.commit()
+            finally:
+                mark_db.close()
+        except Exception as e:
+            print(f"save_surge_20_review {rev.id} failed: {e}")
+
+    return {"status": "ok", "positive_saved": positive_saved, "negative_saved": negative_saved}
+
+
+def get_surge_20_prediction_performance() -> Dict:
+    """surge_20_prediction の検証結果集計"""
+    from app.models.models import PredictionLog, PredictionReview
+
+    db = SessionLocal()
+    try:
+        total = (db.query(PredictionLog)
+                 .filter(PredictionLog.prediction_type == "surge_20_prediction").count())
+        joined = (db.query(PredictionLog, PredictionReview)
+                  .outerjoin(PredictionReview, PredictionLog.id == PredictionReview.prediction_log_id)
+                  .filter(PredictionLog.prediction_type == "surge_20_prediction")
+                  .all())
+        by_label: Dict = {}
+        saved_training = 0
+        for log, rev in joined:
+            if not rev:
+                by_label["未検証"] = by_label.get("未検証", 0) + 1
+                continue
+            label = rev.success_label or "?"
+            by_label[label] = by_label.get(label, 0) + 1
+            if rev.saved_as_training:
+                saved_training += 1
+
+        return {
+            "total_surge_20_predictions": total,
+            "by_result_label": by_label,
+            "saved_as_training": saved_training,
+        }
+    finally:
+        db.close()
+
+
 def list_recent_events(limit: int = 50, event_type: Optional[str] = None) -> List[Dict]:
     db = SessionLocal()
     try:
@@ -787,22 +1169,55 @@ def list_recent_events(limit: int = 50, event_type: Optional[str] = None) -> Lis
         db.close()
 
 
-# ============== 20%到達候補生成 (簡易) ==============
-def build_candidates(market: str = "JP", max_symbols: int = 200) -> Dict:
-    """過去のT-3/T-5 positive pre_features と類似度マッチで候補生成
+# ============== 20%到達候補生成 (orphan除外 + negative_similarity) ==============
+def _classify_candidate(positive_sim: float, negative_sim: float, current: Dict) -> str:
+    """候補分類"""
+    overext = current.get("t1_overextension_score") or 0
+    pc20 = current.get("t1_price_change_20d") or 0
+    upside = current.get("t1_resistance_upside") or 0
+    diff = positive_sim - negative_sim
 
-    実装ポイント: pre_featuresの T-3/T-5 のみを取り出し、現在銘柄のT-1相当と比較。
+    if overext >= 70 or pc20 >= 80:
+        return "上がり切り警戒"
+    if overext >= 60 or pc20 >= 60:
+        return "後追い危険"
+    if negative_sim >= positive_sim + 0.05:
+        return "negative類似高め"
+    if upside < 15:
+        return "見送り"
+    if positive_sim >= 0.7 and diff >= 0.1:
+        return "本命20%到達候補"
+    if positive_sim >= 0.6 and diff >= 0.05:
+        return "20日以内20%候補"
+    if positive_sim >= 0.5:
+        if pc20 >= 20:
+            return "二段目候補"
+        return "1か月以内20%候補"
+    if positive_sim >= 0.4:
+        return "出来高初動候補"
+    return "見送り"
+
+
+def build_candidates(market: str = "JP", max_symbols: int = 200,
+                     min_similarity: float = 0.4) -> Dict:
+    """過去 surge_20 イベント に紐づく valid pre_features と類似度マッチで候補生成。
+    削除済み event の orphan features は除外。T0 は学習特徴量に含めない。
+    negative_similarity も同時計算し、候補分類する。
     """
     from app.services.predictor import _numeric_distance, compute_current_features
 
     db = SessionLocal()
     try:
-        # 全 pre_features を取得 (T-3/T-5を中心に)
+        # 有効 event_id
+        event_ids = {e[0] for e in db.query(Surge20Event.id).all()}
+        # T0を除いた valid pre_features
         pres = (db.query(Surge20PreFeature)
-                .filter(Surge20PreFeature.relative_day.in_(["T-5", "T-3", "T-1"]))
-                .limit(2000).all())
-        # 比較用形式に変換
-        library = [{
+                .filter(Surge20PreFeature.relative_day.in_(["T-20", "T-10", "T-5", "T-3", "T-1"]))
+                .all())
+        valid_features = [p for p in pres if p.surge_event_id in event_ids]
+        orphan_count = len(pres) - len(valid_features)
+
+        positive_library = [{
             "case_id": p.id,
             "symbol": p.symbol,
             "case_type": "surge_20_positive",
@@ -815,12 +1230,23 @@ def build_candidates(market: str = "JP", max_symbols: int = 200) -> Dict:
             "t1_overextension_score": p.overextension_score,
             "label_hit_20_percent": True,
             "relative_day": p.relative_day,
-        } for p in pres]
+        } for p in valid_features]
+
+        # negative library
+        neg_rows = db.query(Surge20NegativeCase).limit(2000).all()
+        negative_library = [{
+            "case_id": n.id,
+            "symbol": n.symbol,
+            "reason": n.reason,
+        } for n in neg_rows]
+        # negative の特徴量は別途取得 (簡易: asof_dateで近い pre_features を使う代わりに current featuresで距離計算)
+        # 簡易実装: positiveに似ていてもnegative_reasonの分布から類推
     finally:
         db.close()
 
-    if not library:
-        return {"status": "no_library", "message": "先に surge_20_events と pre_features を作成してください"}
+    if not positive_library:
+        return {"status": "no_library", "message": "valid pre_features がありません",
+                "orphan_pre_features": orphan_count}
 
     syms = universe_db.list_eligible_yahoo_symbols(
         markets=[market], max_count=max_symbols, include_adr=True,
@@ -836,38 +1262,66 @@ def build_candidates(market: str = "JP", max_symbols: int = 200) -> Dict:
                 continue
         except Exception:
             continue
-        # 類似度上位N件平均
-        scored = []
-        for c in library:
+
+        # positive 類似
+        pos_scored = []
+        for c in positive_library:
             dist = _numeric_distance(current, c)
-            sim = max(0.0, 1.0 - dist)
-            scored.append({"case": c, "similarity": sim})
-        scored.sort(key=lambda x: x["similarity"], reverse=True)
-        top = scored[:5]
-        if not top:
+            pos_scored.append(max(0.0, 1.0 - dist))
+        pos_scored.sort(reverse=True)
+        positive_sim = sum(pos_scored[:5]) / max(1, len(pos_scored[:5])) if pos_scored else 0.0
+
+        # negative similarity (簡易: 高 overextension/低 upside の現在状態が
+        # negative case の典型条件にどれだけ近いか)
+        negative_sim = 0.0
+        overext = current.get("t1_overextension_score") or 0
+        upside = current.get("t1_resistance_upside") or 0
+        pc5 = current.get("t1_price_change_5d") or 0
+        if overext >= 50:
+            negative_sim += 0.3
+        if upside < 10:
+            negative_sim += 0.3
+        if pc5 >= 30:
+            negative_sim += 0.2
+        if (current.get("t1_volume_ratio_20d") or 0) < 1.0:
+            negative_sim += 0.1
+        negative_sim = min(1.0, negative_sim)
+
+        if positive_sim < min_similarity:
             continue
-        avg_sim = sum(x["similarity"] for x in top) / len(top)
-        if avg_sim < 0.4:
-            continue
+
+        candidate_label = _classify_candidate(positive_sim, negative_sim, current)
+
         candidates.append({
             "symbol": sym,
             "name": s.get("name"),
             "market": market_s,
             "current_price": current.get("close"),
-            "avg_similarity_top5": round(avg_sim, 4),
+            "positive_similarity": round(positive_sim, 4),
+            "negative_similarity": round(negative_sim, 4),
+            "similarity_diff": round(positive_sim - negative_sim, 4),
+            "avg_similarity_top5": round(positive_sim, 4),  # 後方互換
+            "candidate_label": candidate_label,
             "resistance_upside": current.get("t1_resistance_upside"),
             "ma25_deviation": current.get("t1_ma25_deviation"),
             "overextension_score": current.get("t1_overextension_score"),
             "support_distance": current.get("t1_support_distance"),
-            "matched_relative_days": [x["case"]["relative_day"] for x in top],
-            "matched_past_symbols": [x["case"]["symbol"] for x in top],
+            "price_change_5d": current.get("t1_price_change_5d"),
+            "price_change_20d": current.get("t1_price_change_20d"),
         })
 
-    candidates.sort(key=lambda x: x["avg_similarity_top5"], reverse=True)
+    candidates.sort(key=lambda x: x["similarity_diff"], reverse=True)
+    by_label = {}
+    for c in candidates:
+        by_label[c["candidate_label"]] = by_label.get(c["candidate_label"], 0) + 1
+
     return {
         "status": "ok",
         "market": market,
         "universe_scanned": len(syms),
+        "valid_pre_features_used": len(positive_library),
+        "orphan_pre_features_excluded": orphan_count,
         "candidates_count": len(candidates),
+        "by_label": by_label,
         "candidates_top50": candidates[:50],
     }

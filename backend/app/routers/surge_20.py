@@ -390,3 +390,59 @@ def generate_negative_cases(req: NegativeGenRequest):
 @router.post("/consolidate-duplicates")
 def consolidate_duplicates(min_gap_days: int = 5):
     return clean_for_json(surge_20.consolidate_duplicate_events(min_gap_days=min_gap_days))
+
+
+# ============== data-quality ==============
+@router.get("/data-quality")
+def data_quality():
+    return clean_for_json(surge_20.get_data_quality())
+
+
+@router.post("/cleanup-orphan-features")
+def cleanup_orphan_features():
+    return surge_20.cleanup_orphan_pre_features()
+
+
+# ============== prediction save/review ==============
+class SaveCandidatePredictionRequest(BaseModel):
+    symbol: str
+    name: Optional[str] = None
+    market: str = "JP"
+    candidate_label: Optional[str] = None
+    final_surge_20_score: Optional[float] = None
+    prediction_horizon: str = "within_20d"
+    target_return: float = 20.0
+    current_price: Optional[float] = None
+    entry_zone_low: Optional[float] = None
+    entry_zone_high: Optional[float] = None
+    stop_loss: Optional[float] = None
+    first_target: Optional[float] = None
+    second_target: Optional[float] = None
+    reason_summary: Optional[str] = None
+    risk_summary: Optional[str] = None
+    positive_similarity: Optional[float] = None
+    negative_similarity: Optional[float] = None
+    similar_past_20_events: Optional[List[Dict]] = None
+
+
+@router.post("/save-candidate-prediction")
+def save_candidate_prediction(req: SaveCandidatePredictionRequest):
+    return clean_for_json(surge_20.save_candidate_as_prediction(req.model_dump()))
+
+
+@router.post("/review-predictions")
+def review_predictions(limit: int = 200):
+    if True:  # async by default
+        t = threading.Thread(target=surge_20.review_surge_20_predictions, args=(limit,), daemon=True)
+        t.start()
+        return {"status": "started", "message": f"surge_20_prediction レビューをbackgroundで開始 (limit={limit})"}
+
+
+@router.post("/save-reviewed-predictions-as-training")
+def save_reviewed_as_training():
+    return clean_for_json(surge_20.save_surge_20_reviews_as_training())
+
+
+@router.get("/prediction-performance")
+def prediction_performance():
+    return clean_for_json(surge_20.get_surge_20_prediction_performance())

@@ -9,10 +9,16 @@ interface Candidate {
   market?: string;
   current_price?: number;
   avg_similarity_top5?: number;
+  positive_similarity?: number;
+  negative_similarity?: number;
+  similarity_diff?: number;
+  candidate_label?: string;
   resistance_upside?: number;
   ma25_deviation?: number;
   overextension_score?: number;
   support_distance?: number;
+  price_change_5d?: number;
+  price_change_20d?: number;
   matched_relative_days?: string[];
   matched_past_symbols?: string[];
 }
@@ -47,6 +53,34 @@ export default function Surge20CandidatesPage() {
   };
 
   const cards = (data?.candidates_top50 || []) as Candidate[];
+  const [savedIds, setSavedIds] = useState<Record<string, number>>({});
+
+  const saveAsPrediction = async (c: Candidate) => {
+    try {
+      const res = await fetchAPI("/api/surge-20/save-candidate-prediction", {
+        method: "POST",
+        body: JSON.stringify({
+          symbol: c.symbol,
+          name: c.name,
+          market: c.market || market,
+          candidate_label: c.candidate_label,
+          final_surge_20_score: (c.positive_similarity ?? 0) * 100,
+          prediction_horizon: "within_20d",
+          target_return: 20.0,
+          current_price: c.current_price,
+          positive_similarity: c.positive_similarity,
+          negative_similarity: c.negative_similarity,
+          reason_summary: `pos_sim=${c.positive_similarity?.toFixed(2)} neg_sim=${c.negative_similarity?.toFixed(2)} label=${c.candidate_label}`,
+          risk_summary: c.candidate_label === "上がり切り警戒" ? "上がり切り警戒" : (c.candidate_label === "後追い危険" ? "後追い危険" : ""),
+        }),
+      });
+      if (res.log_id) {
+        setSavedIds((prev) => ({ ...prev, [c.symbol]: res.log_id }));
+      }
+    } catch (e: any) {
+      alert(`保存失敗: ${e.message}`);
+    }
+  };
 
   return (
     <div className="space-y-5">
@@ -133,8 +167,22 @@ export default function Surge20CandidatesPage() {
       {data?.status === "ok" && (
         <div className="card p-4">
           <h2 className="font-bold text-gray-800 mb-3">
-            候補: {data.candidates_count} 件 (走査 {data.universe_scanned} 銘柄中)
+            候補: {data.candidates_count} 件 (走査 {data.universe_scanned} 銘柄中, valid features {data.valid_pre_features_used}, orphan {data.orphan_pre_features_excluded || 0}除外)
           </h2>
+          {data.by_label && Object.keys(data.by_label).length > 0 && (
+            <div className="flex flex-wrap gap-2 text-xs mb-3">
+              {Object.entries(data.by_label).map(([k, v]: [string, any]) => (
+                <span key={k} className={`px-2 py-1 rounded border ${
+                  k.includes("候補") ? "bg-emerald-50 border-emerald-200 text-emerald-700" :
+                  k === "上がり切り警戒" || k === "後追い危険" ? "bg-orange-50 border-orange-200 text-orange-700" :
+                  k === "negative類似高め" ? "bg-red-50 border-red-200 text-red-700" :
+                  "bg-gray-50 border-gray-200 text-gray-600"
+                }`}>
+                  {k}: <strong>{v}</strong>
+                </span>
+              ))}
+            </div>
+          )}
           <p className="text-xs text-gray-500 mb-3">
             類似度上位TOP5の平均similarityでソート (高いほど過去の+20%到達直前パターンに類似)
           </p>
@@ -176,10 +224,33 @@ export default function Surge20CandidatesPage() {
                   {isOverextended && (
                     <p className="text-xs text-orange-700 mt-2">⚠️ 過熱気味 — 「上がり切り警戒/二段目監視」に該当する可能性</p>
                   )}
-                  <Link href={`/stocks/${encodeURIComponent(c.symbol)}`}
-                    className="mt-2 block text-center text-xs py-1.5 bg-emerald-50 text-emerald-700 rounded hover:bg-emerald-100">
-                    詳細 →
-                  </Link>
+                  {c.candidate_label && (
+                    <p className="text-xs font-bold text-emerald-700 mt-2 px-2 py-1 bg-emerald-50 rounded inline-block">
+                      🌅 {c.candidate_label}
+                    </p>
+                  )}
+                  {c.negative_similarity != null && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      pos_sim={c.positive_similarity?.toFixed(2)} / neg_sim={c.negative_similarity?.toFixed(2)} / diff={c.similarity_diff?.toFixed(2)}
+                    </p>
+                  )}
+                  <div className="flex gap-2 mt-2">
+                    <Link href={`/stocks/${encodeURIComponent(c.symbol)}`}
+                      className="flex-1 text-center text-xs py-1.5 bg-emerald-50 text-emerald-700 rounded hover:bg-emerald-100">
+                      詳細 →
+                    </Link>
+                    {savedIds[c.symbol] ? (
+                      <Link href="/prediction-review"
+                        className="flex-1 text-center text-xs py-1.5 bg-blue-50 text-blue-700 rounded hover:bg-blue-100">
+                        💾 保存済(#{savedIds[c.symbol]}) → 検証
+                      </Link>
+                    ) : (
+                      <button onClick={() => saveAsPrediction(c)}
+                        className="flex-1 text-center text-xs py-1.5 bg-emerald-600 text-white rounded hover:bg-emerald-700">
+                        💾 20%予測として保存
+                      </button>
+                    )}
+                  </div>
                 </div>
               );
             })}

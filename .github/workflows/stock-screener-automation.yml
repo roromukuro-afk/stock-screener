@@ -41,6 +41,9 @@ on:
           - run-surge-20-expand-training-jp
           - run-surge-20-expand-training-us
           - consolidate-surge-20-duplicates
+          - review-surge-20-predictions
+          - save-surge-20-reviews-as-training
+          - cleanup-orphan-pre-features
 
 jobs:
   automate:
@@ -326,6 +329,26 @@ jobs:
             -d '{"market":"US","trigger_type":"manual","max_symbols":100}' \
             -w "\nHTTP %{http_code}\n" \
             "$BACKEND_URL/api/automation/run-surge-20-expand-training"
+
+      - name: Manual - review surge-20 predictions
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'review-surge-20-predictions'
+        run: |
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"trigger_type":"manual"}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/review-surge-20-predictions"
+
+      - name: Manual - save surge-20 reviews as training
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'save-surge-20-reviews-as-training'
+        run: |
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"trigger_type":"manual"}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/save-surge-20-reviews-as-training"
+
+      - name: Manual - cleanup orphan pre_features
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'cleanup-orphan-pre-features'
+        run: |
+          curl -fsS -X POST -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/surge-20/cleanup-orphan-features"
 
       - name: Manual - consolidate surge-20 duplicates
         if: github.event_name == 'workflow_dispatch' && inputs.job == 'consolidate-surge-20-duplicates'

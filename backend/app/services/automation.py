@@ -285,6 +285,37 @@ def run_one_day_surge_detection(market: str = "JP", trigger_type: str = "cron", 
         return {"status": "failed", "error": str(e)}
 
 
+def review_surge_20_predictions(trigger_type: str = "cron") -> Dict:
+    from app.services import surge_20
+    job_id = _create_job("review-surge-20-predictions", "ALL", trigger_type)
+    try:
+        r = surge_20.review_surge_20_predictions(limit=300)
+        _finish_job(job_id, "completed",
+                    reviews_created=r.get("reviewed", 0),
+                    total_symbols=r.get("logs_processed", 0))
+        return {"status": "ok", "job_id": job_id, **r}
+    except Exception as e:
+        _log_error(job_id, "", "review_surge_20", e)
+        _finish_job(job_id, "failed", error_message=str(e))
+        return {"status": "failed", "error": str(e)}
+
+
+def save_surge_20_reviews_as_training(trigger_type: str = "cron") -> Dict:
+    from app.services import surge_20
+    job_id = _create_job("save-surge-20-reviews-as-training", "ALL", trigger_type)
+    try:
+        r = surge_20.save_surge_20_reviews_as_training()
+        _finish_job(job_id, "completed",
+                    training_cases_created=(r.get("positive_saved", 0) + r.get("negative_saved", 0)),
+                    positive_cases_created=r.get("positive_saved", 0),
+                    negative_cases_created=r.get("negative_saved", 0))
+        return {"status": "ok", "job_id": job_id, **r}
+    except Exception as e:
+        _log_error(job_id, "", "save_surge_20_reviews", e)
+        _finish_job(job_id, "failed", error_message=str(e))
+        return {"status": "failed", "error": str(e)}
+
+
 def run_surge_20_expand_training(market: str = "JP", trigger_type: str = "cron",
                                   max_symbols: int = 300, chunk_size: int = 30,
                                   start_offset: int = 0,
