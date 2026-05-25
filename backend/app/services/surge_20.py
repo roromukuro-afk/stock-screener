@@ -1120,15 +1120,17 @@ def get_surge_20_prediction_performance() -> Dict:
 
     db = SessionLocal()
     try:
-        total = (db.query(PredictionLog)
-                 .filter(PredictionLog.prediction_type == "surge_20_prediction").count())
-        joined = (db.query(PredictionLog, PredictionReview)
-                  .outerjoin(PredictionReview, PredictionLog.id == PredictionReview.prediction_log_id)
-                  .filter(PredictionLog.prediction_type == "surge_20_prediction")
-                  .all())
+        logs = (db.query(PredictionLog)
+                .filter(PredictionLog.prediction_type == "surge_20_prediction").all())
+        log_ids = [l.id for l in logs]
+        reviews = (db.query(PredictionReview)
+                   .filter(PredictionReview.prediction_log_id.in_(log_ids)).all()) if log_ids else []
+        rev_by_log = {r.prediction_log_id: r for r in reviews}
+
         by_label: Dict = {}
         saved_training = 0
-        for log, rev in joined:
+        for log in logs:
+            rev = rev_by_log.get(log.id)
             if not rev:
                 by_label["未検証"] = by_label.get("未検証", 0) + 1
                 continue
@@ -1138,7 +1140,7 @@ def get_surge_20_prediction_performance() -> Dict:
                 saved_training += 1
 
         return {
-            "total_surge_20_predictions": total,
+            "total_surge_20_predictions": len(logs),
             "by_result_label": by_label,
             "saved_as_training": saved_training,
         }
