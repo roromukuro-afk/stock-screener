@@ -77,8 +77,12 @@ def generate_ranking_from_ohlcv(
     market: str = "JP",
     snapshot_date: Optional[str] = None,
     top_n: int = 100,
+    max_universe: int = 500,
 ) -> Dict:
-    """OHLCVから指定期間のgain rankingを生成し、surge_ranking_snapshots/items に保存"""
+    """OHLCVから指定期間のgain rankingを生成し、surge_ranking_snapshots/items に保存
+
+    max_universe: Render Free対策で対象銘柄数を制限 (デフォルト500)
+    """
     window = RANKING_WINDOWS.get(ranking_type)
     if window is None:
         return {"status": "failed", "error": f"unknown ranking_type {ranking_type}"}
@@ -88,7 +92,7 @@ def generate_ranking_from_ohlcv(
     # 対象 universe 銘柄
     syms = universe_db.list_eligible_yahoo_symbols(
         markets=[market] if market != "ALL" else ["JP", "US"],
-        max_count=0,
+        max_count=max_universe,
         include_adr=True,
     )
 
@@ -182,12 +186,14 @@ def generate_ranking_from_ohlcv(
     }
 
 
-def generate_all_rankings(market: str = "JP", snapshot_date: Optional[str] = None, top_n: int = 100) -> Dict:
-    """1日/3日/5日/1週/10日/20日/1月 を一括生成"""
+def generate_all_rankings(market: str = "JP", snapshot_date: Optional[str] = None,
+                          top_n: int = 100, max_universe: int = 300) -> Dict:
+    """1日/3日/5日/1週/10日/20日/1月 を一括生成 (Render Free対策で max_universe=300)"""
     out = {}
     for rt in RANKING_WINDOWS.keys():
         try:
-            r = generate_ranking_from_ohlcv(rt, market=market, snapshot_date=snapshot_date, top_n=top_n)
+            r = generate_ranking_from_ohlcv(rt, market=market, snapshot_date=snapshot_date,
+                                            top_n=top_n, max_universe=max_universe)
             out[rt] = {"snapshot_id": r.get("snapshot_id"), "total": r.get("total_items")}
         except Exception as e:
             out[rt] = {"error": str(e)}

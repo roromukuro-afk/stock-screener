@@ -25,18 +25,53 @@ class GenerateRankingsRequest(BaseModel):
     snapshot_date: Optional[str] = None
     top_n: int = 100
     ranking_types: Optional[List[str]] = None  # None=全種類
+    max_universe: int = 300  # Render Free対策
+    async_mode: bool = True  # 大量銘柄では必ずTrue推奨
+
+
+def _run_rankings_sync(req_dict: Dict):
+    """background thread で実行"""
+    market = req_dict.get("market", "JP")
+    rts = req_dict.get("ranking_types")
+    if rts:
+        for rt in rts:
+            try:
+                surge_20.generate_ranking_from_ohlcv(
+                    rt, market=market,
+                    snapshot_date=req_dict.get("snapshot_date"),
+                    top_n=req_dict.get("top_n", 100),
+                    max_universe=req_dict.get("max_universe", 300),
+                )
+            except Exception as e:
+                print(f"ranking gen {rt} failed: {e}")
+    else:
+        surge_20.generate_all_rankings(
+            market=market,
+            snapshot_date=req_dict.get("snapshot_date"),
+            top_n=req_dict.get("top_n", 100),
+            max_universe=req_dict.get("max_universe", 300),
+        )
 
 
 @router.post("/generate-rankings-from-ohlcv")
 def generate_rankings_from_ohlcv(req: GenerateRankingsRequest):
+    """ランキング生成。async_mode=True なら background thread で実行 (推奨)"""
+    if req.async_mode:
+        t = threading.Thread(target=_run_rankings_sync, args=(req.model_dump(),), daemon=True)
+        t.start()
+        return {"status": "started", "message": f"ランキング生成を background で開始 (market={req.market})",
+                "note": "/api/surge-20/recent-snapshots で確認してください"}
+    # 同期 (小規模テスト用)
     if req.ranking_types:
         out = {}
         for rt in req.ranking_types:
             out[rt] = surge_20.generate_ranking_from_ohlcv(
-                rt, market=req.market, snapshot_date=req.snapshot_date, top_n=req.top_n
+                rt, market=req.market, snapshot_date=req.snapshot_date,
+                top_n=req.top_n, max_universe=req.max_universe,
             )
         return clean_for_json({"status": "ok", "rankings": out})
-    r = surge_20.generate_all_rankings(market=req.market, snapshot_date=req.snapshot_date, top_n=req.top_n)
+    r = surge_20.generate_all_rankings(market=req.market, snapshot_date=req.snapshot_date,
+                                       top_n=req.top_n, max_universe=req.max_universe)
     return clean_for_json(r)
 
 
@@ -134,10 +169,19 @@ def import_ranking(req: ImportRankingRequest):
 class DetectRequest(BaseModel):
     market: str = "JP"
     max_symbols: int = 50
+    async_mode: bool = True
 
 
 @router.post("/detect-events")
 def detect_events(req: DetectRequest):
+    if req.async_mode:
+        t = threading.Thread(
+            target=surge_20.detect_events_for_universe,
+            args=(req.market, req.max_symbols),
+            daemon=True,
+        )
+        t.start()
+        return {"status": "started", "message": f"イベント検出を background で開始 (market={req.market}, max={req.max_symbols})"}
     return clean_for_json(surge_20.detect_events_for_universe(market=req.market, max_symbols=req.max_symbols))
 
 
@@ -166,13 +210,28 @@ def events(limit: int = 50, event_type: Optional[str] = None):
 # ============== 特徴量 ==============
 @router.post("/extract-pre-features")
 def extract_pre_features(req: DetectRequest):
-    # request param 不要だが BaseModel 受けるため
+    if req.async_mode:
+        t = threading.Thread(
+            target=surge_20.extract_pre_features_for_recent_events,
+            args=(req.max_symbols,),
+            daemon=True,
+        )
+        t.start()
+        return {"status": "started", "message": f"pre_features抽出を background で開始 (events={req.max_symbols})"}
     return surge_20.extract_pre_features_for_recent_events(limit=req.max_symbols)
 
 
 # ============== 候補 ==============
 @router.post("/build-candidates")
 def build_candidates(req: DetectRequest):
+    if req.async_mode:
+        t = threading.Thread(
+            target=surge_20.build_candidates,
+            args=(req.market, req.max_symbols),
+            daemon=True,
+        )
+        t.start()
+        return {"status": "started", "message": f"候補生成を background で開始 (market={req.market}, max={req.max_symbols})"}
     return clean_for_json(surge_20.build_candidates(market=req.market, max_symbols=req.max_symbols))
 
 
