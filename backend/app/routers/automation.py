@@ -226,6 +226,27 @@ def run_one_day_surge_detection(req: TriggerRequest,
     return {"status": "started", "job_type": "one-day-surge-detection"}
 
 
+@router.post("/run-surge-20-auto-orchestrator")
+def run_surge_20_auto_orchestrator(req: TriggerRequest,
+                                    x_cron_secret: Optional[str] = Header(None),
+                                    authorization: Optional[str] = Header(None)):
+    _check_secret(x_cron_secret, authorization)
+    _run_async(automation.run_surge_20_auto_orchestrator,
+               req.market or "JP", req.trigger_type or "cron", "all")
+    return {"status": "started", "job_type": "surge-20-auto-orchestrator"}
+
+
+@router.post("/auto-save-surge-20-predictions")
+def auto_save_surge_20_predictions(req: TriggerRequest,
+                                    x_cron_secret: Optional[str] = Header(None),
+                                    authorization: Optional[str] = Header(None)):
+    _check_secret(x_cron_secret, authorization)
+    return automation.auto_save_surge_20_predictions(
+        req.market or "JP", req.trigger_type or "cron",
+        20, 70.0,
+    )
+
+
 @router.post("/review-surge-20-predictions")
 def review_surge_20_predictions(req: TriggerRequest,
                                  x_cron_secret: Optional[str] = Header(None),

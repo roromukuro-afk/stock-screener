@@ -500,6 +500,37 @@ class Surge20PreFeature(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class Surge20Candidate(Base):
+    __tablename__ = "surge_20_candidates"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)
+    market = Column(String, index=True)
+    name = Column(String)
+    candidate_date = Column(String, index=True)
+    final_surge_20_score = Column(Float)
+    candidate_label = Column(String, index=True)
+    prediction_horizon = Column(String, default="within_20d")
+    current_price = Column(Float)
+    entry_zone_low = Column(Float)
+    entry_zone_high = Column(Float)
+    stop_loss = Column(Float)
+    first_target = Column(Float)
+    second_target = Column(Float)
+    support_distance = Column(Float)
+    resistance_upside = Column(Float)
+    positive_similarity = Column(Float)
+    negative_similarity = Column(Float)
+    similarity_gap = Column(Float)
+    overextension_score = Column(Float)
+    similar_past_20_events = Column(JSON)
+    failure_pattern_similarity = Column(Float)
+    reason_summary = Column(Text)
+    risk_summary = Column(Text)
+    auto_saved_as_prediction = Column(Boolean, default=False)
+    prediction_log_id = Column(Integer)
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class Surge20NegativeCase(Base):
     __tablename__ = "surge_20_negative_cases"
     id = Column(Integer, primary_key=True, index=True)

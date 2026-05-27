@@ -8,6 +8,12 @@ on:
     - cron: "10 23 * * 1-5"
     - cron: "0 0 * * 1-5"
     - cron: "0 14 * * 0,6"
+    # ===== surge-20 専用スケジュール =====
+    - cron: "30 7 * * 1-5"  # JST 16:30 平日: JPデータ拡張 (cursor chunk)
+    - cron: "30 8 * * 1-5"  # JST 17:30 平日: JP候補生成+auto-save
+    - cron: "0 23 * * 0-4"  # JST 08:00 平日: USデータ拡張
+    - cron: "30 0 * * 1-5"  # JST 09:30 平日: surge-20 review + training save
+    - cron: "0 13 * * 0,6"  # 土日 JST 22:00: 大きめ拡張 (orchestrator)
   workflow_dispatch:
     inputs:
       job:
@@ -44,6 +50,10 @@ on:
           - review-surge-20-predictions
           - save-surge-20-reviews-as-training
           - cleanup-orphan-pre-features
+          - run-surge-20-auto-orchestrator-jp
+          - run-surge-20-auto-orchestrator-us
+          - auto-save-surge-20-predictions-jp
+          - auto-save-surge-20-predictions-us
 
 jobs:
   automate:
@@ -146,6 +156,60 @@ jobs:
           curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" -d '{"trigger_type":"cron"}' \
             -w "\nHTTP %{http_code}\n" \
             "$BACKEND_URL/api/automation/save-reviews-as-training"
+
+      # ===== surge-20 専用 scheduled =====
+      - name: JST 16:30 JP - surge-20 expand cursor chunk + ranking + 1-day surge
+        if: github.event_name == 'schedule' && github.event.schedule == '30 7 * * 1-5'
+        run: |
+          set -e
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-surge-ranking-generation"
+          sleep 20
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"cron","max_symbols":200}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-one-day-surge-detection"
+          sleep 20
+          # cursor付きexpand (JP)
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-surge-20-auto-orchestrator"
+
+      - name: JST 17:30 JP - surge-20 candidate build + auto-save
+        if: github.event_name == 'schedule' && github.event.schedule == '30 8 * * 1-5'
+        run: |
+          set -e
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"cron","max_symbols":200}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-surge-20-candidate-build"
+          sleep 60
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/auto-save-surge-20-predictions"
+
+      - name: JST 08:00 US - surge-20 expand + 1-day
+        if: github.event_name == 'schedule' && github.event.schedule == '0 23 * * 0-4'
+        run: |
+          set -e
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"US","trigger_type":"cron","max_symbols":150}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-one-day-surge-detection"
+          sleep 30
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"US","trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-surge-20-auto-orchestrator"
+
+      - name: JST 09:30 surge-20 review + training save
+        if: github.event_name == 'schedule' && github.event.schedule == '30 0 * * 1-5'
+        run: |
+          set -e
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/review-surge-20-predictions"
+          sleep 30
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/save-surge-20-reviews-as-training"
 
       - name: Weekend JST 23:00 - training builder
         if: github.event_name == 'schedule' && github.event.schedule == '0 14 * * 0,6'
@@ -329,6 +393,34 @@ jobs:
             -d '{"market":"US","trigger_type":"manual","max_symbols":100}' \
             -w "\nHTTP %{http_code}\n" \
             "$BACKEND_URL/api/automation/run-surge-20-expand-training"
+
+      - name: Manual - surge-20 auto orchestrator JP
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-surge-20-auto-orchestrator-jp'
+        run: |
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"manual"}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-surge-20-auto-orchestrator"
+
+      - name: Manual - surge-20 auto orchestrator US
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'run-surge-20-auto-orchestrator-us'
+        run: |
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"US","trigger_type":"manual"}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-surge-20-auto-orchestrator"
+
+      - name: Manual - auto-save surge-20 predictions JP
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'auto-save-surge-20-predictions-jp'
+        run: |
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"manual"}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/auto-save-surge-20-predictions"
+
+      - name: Manual - auto-save surge-20 predictions US
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'auto-save-surge-20-predictions-us'
+        run: |
+          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"US","trigger_type":"manual"}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/auto-save-surge-20-predictions"
 
       - name: Manual - review surge-20 predictions
         if: github.event_name == 'workflow_dispatch' && inputs.job == 'review-surge-20-predictions'

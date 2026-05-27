@@ -285,6 +285,47 @@ def run_one_day_surge_detection(market: str = "JP", trigger_type: str = "cron", 
         return {"status": "failed", "error": str(e)}
 
 
+def run_surge_20_auto_orchestrator(market: str = "JP", trigger_type: str = "cron",
+                                    phase: str = "all") -> Dict:
+    from app.services import surge_20
+    job_id = _create_job(f"surge-20-orchestrator/{phase}", market, trigger_type)
+    try:
+        r = surge_20.run_auto_orchestrator(market=market, phase=phase)
+        # aggregate counters
+        expand = (r.get("results") or {}).get("expand_training") or {}
+        cb = (r.get("results") or {}).get("candidate_build") or {}
+        autosave = (r.get("results") or {}).get("auto_save") or {}
+        review = (r.get("results") or {}).get("review") or {}
+        train = (r.get("results") or {}).get("training_save") or {}
+        _finish_job(job_id, "completed",
+                    total_symbols=expand.get("processed_symbols", 0),
+                    detected_surge_count=expand.get("events_saved", 0),
+                    positive_cases_created=expand.get("features_created", 0) + train.get("positive_saved", 0),
+                    negative_cases_created=expand.get("negatives_created", 0) + train.get("negative_saved", 0),
+                    predictions_saved=autosave.get("saved", 0),
+                    reviews_created=review.get("reviewed", 0),
+                    training_cases_created=(train.get("positive_saved", 0) + train.get("negative_saved", 0)))
+        return {"status": "ok", "job_id": job_id, **r}
+    except Exception as e:
+        _log_error(job_id, "", "surge_20_orchestrator", e)
+        _finish_job(job_id, "failed", error_message=str(e))
+        return {"status": "failed", "error": str(e)}
+
+
+def auto_save_surge_20_predictions(market: str = "JP", trigger_type: str = "cron",
+                                    limit: int = 20, min_score: float = 70.0) -> Dict:
+    from app.services import surge_20
+    job_id = _create_job("auto-save-surge-20-predictions", market, trigger_type)
+    try:
+        r = surge_20.auto_save_top_candidates(market=market, limit=limit, min_score=min_score)
+        _finish_job(job_id, "completed", predictions_saved=r.get("saved", 0))
+        return {"status": "ok", "job_id": job_id, **r}
+    except Exception as e:
+        _log_error(job_id, "", "auto_save_surge_20", e)
+        _finish_job(job_id, "failed", error_message=str(e))
+        return {"status": "failed", "error": str(e)}
+
+
 def review_surge_20_predictions(trigger_type: str = "cron") -> Dict:
     from app.services import surge_20
     job_id = _create_job("review-surge-20-predictions", "ALL", trigger_type)

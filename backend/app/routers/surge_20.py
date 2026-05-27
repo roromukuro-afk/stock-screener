@@ -446,3 +446,85 @@ def save_reviewed_as_training():
 @router.get("/prediction-performance")
 def prediction_performance():
     return clean_for_json(surge_20.get_surge_20_prediction_performance())
+
+
+# ============== orchestrator + auto-save + candidates list ==============
+class OrchestratorRequest(BaseModel):
+    market: str = "JP"
+    phase: str = "all"  # all / expand / candidates / review / data-quality
+
+
+@router.post("/run-auto-orchestrator")
+def run_auto_orchestrator(req: OrchestratorRequest):
+    """surge-20 全フローを非同期実行 (CRON_SECRET不要なopen版)"""
+    t = threading.Thread(target=surge_20.run_auto_orchestrator,
+                          args=(req.market, req.phase), daemon=True)
+    t.start()
+    return {"status": "started", "message": f"orchestrator開始 market={req.market} phase={req.phase}"}
+
+
+class AutoSaveRequest(BaseModel):
+    market: str = "JP"
+    limit: int = 20
+    min_score: float = 70.0
+
+
+@router.post("/auto-save-top-candidates")
+def auto_save_top_candidates(req: AutoSaveRequest):
+    return clean_for_json(surge_20.auto_save_top_candidates(
+        market=req.market, limit=req.limit, min_score=req.min_score,
+    ))
+
+
+class BuildSaveRequest(BaseModel):
+    market: str = "JP"
+    max_symbols: int = 200
+    min_similarity: float = 0.4
+
+
+@router.post("/build-and-save-candidates")
+def build_and_save(req: BuildSaveRequest):
+    return clean_for_json(surge_20.build_and_save_candidates(
+        market=req.market, max_symbols=req.max_symbols, min_similarity=req.min_similarity,
+    ))
+
+
+@router.get("/candidates-today")
+def candidates_today(market: Optional[str] = None, limit: int = 100):
+    from app.database import SessionLocal
+    from app.models.models import Surge20Candidate
+    today = date.today().isoformat()
+    db = SessionLocal()
+    try:
+        q = (db.query(Surge20Candidate)
+             .filter(Surge20Candidate.candidate_date == today))
+        if market:
+            q = q.filter(Surge20Candidate.market == market)
+        rows = q.order_by(Surge20Candidate.final_surge_20_score.desc()).limit(limit).all()
+        return clean_for_json({
+            "candidate_date": today,
+            "count": len(rows),
+            "items": [{
+                "id": r.id, "symbol": r.symbol, "name": r.name, "market": r.market,
+                "candidate_label": r.candidate_label,
+                "final_surge_20_score": r.final_surge_20_score,
+                "current_price": r.current_price,
+                "positive_similarity": r.positive_similarity,
+                "negative_similarity": r.negative_similarity,
+                "similarity_gap": r.similarity_gap,
+                "overextension_score": r.overextension_score,
+                "resistance_upside": r.resistance_upside,
+                "support_distance": r.support_distance,
+                "reason_summary": r.reason_summary,
+                "risk_summary": r.risk_summary,
+                "auto_saved_as_prediction": r.auto_saved_as_prediction,
+                "prediction_log_id": r.prediction_log_id,
+            } for r in rows],
+        })
+    finally:
+        db.close()
+
+
+@router.get("/orchestrator-state")
+def orchestrator_state():
+    return clean_for_json(surge_20.get_orchestrator_state())

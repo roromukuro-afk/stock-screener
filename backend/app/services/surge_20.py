@@ -848,6 +848,350 @@ def list_snapshot_items(snapshot_id: int, limit: int = 100) -> List[Dict]:
         db.close()
 
 
+# ============== automation_state cursor ==============
+def _state_get(key: str, default: str = "0") -> str:
+    """automation_settings を cursor として流用"""
+    from app.models.models import AutomationSetting
+    db = SessionLocal()
+    try:
+        r = db.query(AutomationSetting).filter(AutomationSetting.key == key).first()
+        return r.value if r else default
+    finally:
+        db.close()
+
+
+def _state_set(key: str, value: str):
+    from app.models.models import AutomationSetting
+    db = SessionLocal()
+    try:
+        r = db.query(AutomationSetting).filter(AutomationSetting.key == key).first()
+        if r:
+            r.value = str(value)
+        else:
+            db.add(AutomationSetting(key=key, value=str(value)))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _state_set_timestamp(key: str):
+    _state_set(key, datetime.utcnow().isoformat())
+
+
+# ============== chunk expand-training (cursor付き) ==============
+def expand_training_chunked(market: str = "JP", chunk_size: int = 50,
+                             max_chunks_per_run: int = 2,
+                             priority_mode: str = "all_eligible") -> Dict:
+    """cursor付きchunk実行: automation_stateから offset を読み, max_chunks_per_run回処理"""
+    offset_key = f"surge20_{market.lower()}_expand_offset"
+    try:
+        current_offset = int(_state_get(offset_key, "0"))
+    except ValueError:
+        current_offset = 0
+
+    syms = universe_db.list_eligible_yahoo_symbols(
+        markets=[market], max_count=0, include_adr=True
+    )
+    total_universe = len(syms)
+    if total_universe == 0:
+        return {"status": "no_universe"}
+
+    end_offset = min(current_offset + chunk_size * max_chunks_per_run, total_universe)
+    target_syms = syms[current_offset:end_offset]
+
+    total_events = 0; total_features = 0; total_negatives = 0
+    for chunk_start in range(0, len(target_syms), chunk_size):
+        chunk = target_syms[chunk_start: chunk_start + chunk_size]
+        chunk_events = []
+        for s in chunk:
+            sym = s["yahoo_symbol"]
+            mk = s.get("market") or market
+            try:
+                chunk_events.extend(detect_one_day_surges(sym, mk))
+                chunk_events.extend(detect_multi_day_hit_20(sym, mk))
+            except Exception as e:
+                print(f"detect failed {sym}: {e}")
+        saved = _save_surge_events(chunk_events, source_type="detected_from_ohlcv")
+        total_events += saved
+        try:
+            fres = extract_pre_features_for_recent_events(limit=200)
+            total_features += fres.get("features_created", 0)
+        except Exception as e:
+            print(f"extract failed: {e}")
+        for s in chunk:
+            try:
+                total_negatives += generate_negative_cases_for_symbol(
+                    s["yahoo_symbol"], s.get("market") or market, max_cases=15
+                )
+            except Exception:
+                pass
+
+    # cursor 更新
+    next_offset = end_offset if end_offset < total_universe else 0  # 一巡したら戻す
+    _state_set(offset_key, str(next_offset))
+    _state_set_timestamp(f"surge20_{market.lower()}_last_expand_at")
+
+    return {
+        "status": "ok",
+        "market": market,
+        "previous_offset": current_offset,
+        "next_offset": next_offset,
+        "processed_symbols": len(target_syms),
+        "total_universe": total_universe,
+        "events_saved": total_events,
+        "features_created": total_features,
+        "negatives_created": total_negatives,
+        "cycle_completed": next_offset == 0,
+    }
+
+
+# ============== 候補をDB保存 + auto-save ==============
+def build_and_save_candidates(market: str = "JP", max_symbols: int = 200,
+                               min_similarity: float = 0.4) -> Dict:
+    """候補を生成して surge_20_candidates に保存"""
+    from app.models.models import Surge20Candidate
+
+    r = build_candidates(market=market, max_symbols=max_symbols, min_similarity=min_similarity)
+    if r.get("status") != "ok":
+        return r
+
+    today = date.today().isoformat()
+    saved = 0
+    updated = 0
+    for c in r.get("candidates_top50", []):
+        db = SessionLocal()
+        try:
+            existing = (db.query(Surge20Candidate)
+                        .filter(Surge20Candidate.symbol == c["symbol"])
+                        .filter(Surge20Candidate.candidate_date == today)
+                        .first())
+            score = (c.get("positive_similarity") or 0) * 100
+            payload = {
+                "symbol": c["symbol"],
+                "market": c.get("market") or market,
+                "name": c.get("name"),
+                "candidate_date": today,
+                "final_surge_20_score": score,
+                "candidate_label": c.get("candidate_label"),
+                "prediction_horizon": "within_20d",
+                "current_price": c.get("current_price"),
+                "support_distance": c.get("support_distance"),
+                "resistance_upside": c.get("resistance_upside"),
+                "positive_similarity": c.get("positive_similarity"),
+                "negative_similarity": c.get("negative_similarity"),
+                "similarity_gap": c.get("similarity_diff"),
+                "overextension_score": c.get("overextension_score"),
+                "reason_summary": f"pos={c.get('positive_similarity'):.2f} neg={c.get('negative_similarity'):.2f}",
+                "risk_summary": (c.get("candidate_label") if c.get("candidate_label") in ("上がり切り警戒", "後追い危険", "negative類似高め") else None),
+            }
+            if existing:
+                for k, v in payload.items():
+                    if k not in ("symbol", "candidate_date"):
+                        setattr(existing, k, v)
+                updated += 1
+            else:
+                db.add(Surge20Candidate(**payload))
+                saved += 1
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"save candidate {c.get('symbol')} failed: {e}")
+        finally:
+            db.close()
+
+    _state_set_timestamp("surge20_last_candidate_build_at")
+    return {
+        "status": "ok",
+        "market": market,
+        "candidate_date": today,
+        "candidates_count": r.get("candidates_count"),
+        "saved": saved,
+        "updated": updated,
+        "by_label": r.get("by_label"),
+    }
+
+
+AUTO_SAVE_LABELS = {
+    "本命20%到達候補", "20日以内20%候補", "1か月以内20%候補",
+    "出来高初動候補", "二段目候補", "押し目再上昇候補",
+}
+AUTO_SAVE_MAX_PER_DAY = 20
+
+
+def auto_save_top_candidates(market: str = "JP", limit: int = 20,
+                              min_score: float = 70.0) -> Dict:
+    """surge_20_candidates から条件を満たすものを prediction_logs に自動保存"""
+    from app.models.models import Surge20Candidate, PredictionLog
+    today = date.today().isoformat()
+
+    db = SessionLocal()
+    try:
+        cands = (db.query(Surge20Candidate)
+                 .filter(Surge20Candidate.market == market)
+                 .filter(Surge20Candidate.candidate_date == today)
+                 .filter(Surge20Candidate.final_surge_20_score >= min_score)
+                 .filter(Surge20Candidate.auto_saved_as_prediction == False)
+                 .order_by(Surge20Candidate.final_surge_20_score.desc())
+                 .all())
+    finally:
+        db.close()
+
+    saved = 0
+    skipped = 0
+    for c in cands:
+        if saved >= limit or saved >= AUTO_SAVE_MAX_PER_DAY:
+            break
+        # フィルター
+        if c.candidate_label not in AUTO_SAVE_LABELS:
+            skipped += 1; continue
+        if (c.negative_similarity or 0) >= 0.65:
+            skipped += 1; continue
+        if (c.overextension_score or 0) >= 70:
+            skipped += 1; continue
+        if (c.resistance_upside or 0) < 10:
+            skipped += 1; continue
+        if not c.current_price or c.current_price <= 0:
+            skipped += 1; continue
+
+        # 直近5営業日以内に同じsymbolのopen予測あれば skip
+        check_db = SessionLocal()
+        try:
+            from datetime import timedelta as td
+            five_days_ago = (date.today() - td(days=7)).isoformat()
+            recent = (check_db.query(PredictionLog)
+                      .filter(PredictionLog.symbol == c.symbol)
+                      .filter(PredictionLog.prediction_type == "surge_20_prediction")
+                      .filter(PredictionLog.status == "open")
+                      .filter(PredictionLog.prediction_date >= five_days_ago)
+                      .first())
+            if recent:
+                skipped += 1; continue
+        finally:
+            check_db.close()
+
+        # 保存
+        save_db = SessionLocal()
+        try:
+            log = PredictionLog(
+                symbol=c.symbol, yahoo_symbol=c.symbol,
+                name=c.name, market=c.market,
+                prediction_date=today,
+                current_price_at_prediction=c.current_price,
+                jpy_price_at_prediction=c.current_price,
+                prediction_label=c.candidate_label,
+                final_prediction_score=c.final_surge_20_score,
+                prediction_type="surge_20_prediction",
+                prediction_horizon="within_20d",
+                target_return=20.0,
+                entry_type="surge_20_auto",
+                entry_zone_a_low=c.entry_zone_low,
+                entry_zone_a_high=c.entry_zone_high,
+                stop_loss_price=c.stop_loss,
+                take_profit_1=c.first_target,
+                take_profit_2=c.second_target,
+                positive_case_similarity=c.positive_similarity,
+                negative_case_similarity=c.negative_similarity,
+                reason_summary=c.reason_summary,
+                avoid_condition=c.risk_summary,
+                status="open",
+            )
+            save_db.add(log); save_db.flush()
+            log_id = log.id
+
+            # 元 candidate を更新
+            cand_db_row = save_db.query(Surge20Candidate).filter(Surge20Candidate.id == c.id).first()
+            if cand_db_row:
+                cand_db_row.auto_saved_as_prediction = True
+                cand_db_row.prediction_log_id = log_id
+            save_db.commit()
+            saved += 1
+        except Exception as e:
+            save_db.rollback()
+            print(f"auto-save {c.symbol} failed: {e}")
+        finally:
+            save_db.close()
+
+    _state_set_timestamp(f"surge20_{market.lower()}_last_auto_save_at")
+    return {"status": "ok", "market": market, "candidates_checked": len(cands),
+            "saved": saved, "skipped": skipped}
+
+
+# ============== Auto Orchestrator ==============
+def run_auto_orchestrator(market: str = "JP", phase: str = "all") -> Dict:
+    """surge-20 全フローを連鎖実行。Render Free対策で各stepは小さく。
+
+    phase: "all" / "expand" / "candidates" / "review" / "data-quality"
+    """
+    results = {}
+
+    # 1. data-quality
+    if phase in ("all", "data-quality"):
+        try:
+            results["data_quality_before"] = get_data_quality()
+        except Exception as e:
+            results["data_quality_before_error"] = str(e)
+
+    # 2. orphan cleanup
+    if phase in ("all", "data-quality", "expand"):
+        try:
+            results["orphan_cleanup"] = cleanup_orphan_pre_features()
+        except Exception as e:
+            results["orphan_cleanup_error"] = str(e)
+
+    # 3. expand training (chunk cursor付き)
+    if phase in ("all", "expand"):
+        try:
+            results["expand_training"] = expand_training_chunked(
+                market=market, chunk_size=30, max_chunks_per_run=1,
+                priority_mode="all_eligible",
+            )
+        except Exception as e:
+            results["expand_training_error"] = str(e)
+
+    # 4. candidates + auto-save
+    if phase in ("all", "candidates"):
+        try:
+            results["candidate_build"] = build_and_save_candidates(
+                market=market, max_symbols=100, min_similarity=0.4,
+            )
+            results["auto_save"] = auto_save_top_candidates(
+                market=market, limit=20, min_score=70.0,
+            )
+        except Exception as e:
+            results["candidate_error"] = str(e)
+
+    # 5. review + training save
+    if phase in ("all", "review"):
+        try:
+            results["review"] = review_surge_20_predictions(limit=200)
+            results["training_save"] = save_surge_20_reviews_as_training()
+        except Exception as e:
+            results["review_error"] = str(e)
+
+    # 6. data-quality after
+    if phase in ("all", "data-quality"):
+        try:
+            results["data_quality_after"] = get_data_quality()
+        except Exception as e:
+            pass
+
+    _state_set_timestamp("surge20_last_orchestrator_at")
+    return {"status": "ok", "market": market, "phase": phase, "results": results}
+
+
+# ============== サマリ追加用 helper ==============
+def get_orchestrator_state() -> Dict:
+    """automation_state の cursor / timestamp 群を返す"""
+    keys = [
+        "surge20_jp_expand_offset", "surge20_us_expand_offset",
+        "surge20_jp_last_expand_at", "surge20_us_last_expand_at",
+        "surge20_last_candidate_build_at",
+        "surge20_jp_last_auto_save_at", "surge20_us_last_auto_save_at",
+        "surge20_last_orchestrator_at",
+    ]
+    return {k: _state_get(k, "") for k in keys}
+
+
 # ============== surge_20_prediction 保存 / 検証 / 教師化 ==============
 def save_candidate_as_prediction(body: Dict) -> Dict:
     """候補を prediction_logs に surge_20_prediction として保存"""
