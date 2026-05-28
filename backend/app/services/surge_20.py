@@ -788,6 +788,61 @@ def cleanup_orphan_pre_features() -> Dict:
         db.close()
 
 
+def get_light_status() -> Dict:
+    """高負荷時でも返る軽量status。最小限のCOUNTのみ。"""
+    from app.models.models import (
+        Surge20Candidate, PredictionLog, AutomationError, AutomationLock
+    )
+    today = date.today().isoformat()
+    db = SessionLocal()
+    try:
+        # 今日のcandidates
+        cands_today = (db.query(Surge20Candidate)
+                       .filter(Surge20Candidate.candidate_date == today).count())
+        # 今日のprediction保存 (type別)
+        def _count_today(pt):
+            return (db.query(PredictionLog)
+                    .filter(PredictionLog.prediction_date == today)
+                    .filter(PredictionLog.prediction_type == pt).count())
+        main_today = _count_today("surge_20_prediction")
+        watch_today = _count_today("surge_20_watch_prediction")
+        rejected_today = _count_today("surge_20_rejected_watch")
+        late_chase_today = _count_today("surge_20_late_chase_watch")
+        # open surge_20 predictions
+        open_preds = (db.query(PredictionLog)
+                      .filter(PredictionLog.prediction_type.in_(SURGE_20_PREDICTION_TYPES))
+                      .filter(PredictionLog.status == "open").count())
+        # active locks
+        now = datetime.utcnow()
+        active_locks = []
+        for lk in db.query(AutomationLock).all():
+            if lk.expires_at and lk.expires_at > now:
+                active_locks.append(lk.lock_key)
+        # errors last 24h
+        err_cutoff = now - timedelta(hours=24)
+        errors_24h = db.query(AutomationError).filter(AutomationError.created_at >= err_cutoff).count()
+
+        # render_safe_to_run: in-memory heavy lock + active DB locks がなければ安全
+        safe = (not is_heavy_running()) and len(active_locks) == 0
+
+        return {
+            "status": "ok",
+            "active_locks": active_locks,
+            "heavy_running": is_heavy_running(),
+            "heavy_task": heavy_status().get("task"),
+            "candidates_today": cands_today,
+            "main_saved_today": main_today,
+            "watch_saved_today": watch_today,
+            "rejected_watch_saved_today": rejected_today,
+            "late_chase_watch_saved_today": late_chase_today,
+            "open_surge_20_predictions": open_preds,
+            "errors_last_24h": errors_24h,
+            "render_safe_to_run": safe,
+        }
+    finally:
+        db.close()
+
+
 # ============== サマリ ==============
 def get_summary() -> Dict:
     db = SessionLocal()
@@ -1276,71 +1331,101 @@ def auto_save_top_candidates(market: str = "JP", limit: int = 20,
 
 
 # ============== Auto Orchestrator ==============
-def run_auto_orchestrator(market: str = "JP", phase: str = "all") -> Dict:
-    """surge-20 全フローを連鎖実行。Render Free対策で各stepは小さく + 同時実行lock。
+def run_auto_orchestrator(market: str = "JP", phase: str = "full_light",
+                          chunk_size: int = 20, max_seconds: int = 90) -> Dict:
+    """surge-20 をphase分割で実行。Render Free対策で各stepは小さく + 同時実行lock。
 
-    phase: "all" / "expand" / "candidates" / "review" / "data-quality"
+    phase:
+      data_quality / cleanup / expand_one_chunk / candidate_build /
+      auto_save / review_predictions / save_reviews_as_training /
+      full_light / all(後方互換)
     """
-    if not _acquire_heavy(f"orchestrator/{market}/{phase}"):
+    # 軽い phase は lock 不要 (data_quality / auto_save は DBのみ)
+    LIGHT_PHASES = {"data_quality", "auto_save", "save_reviews_as_training"}
+    needs_lock = phase not in LIGHT_PHASES
+
+    if needs_lock and not _acquire_heavy(f"orchestrator/{market}/{phase}"):
         return {"status": "busy", "message": f"別の重い処理が実行中: {_heavy_running['task']}"}
 
+    import time as _time
+    t_start = _time.time()
     results = {}
+    partial = False
     try:
-        # 1. data-quality
-        if phase in ("all", "data-quality"):
-            try:
-                results["data_quality_before"] = get_data_quality()
-            except Exception as e:
-                results["data_quality_before_error"] = str(e)
+        def _elapsed():
+            return _time.time() - t_start
 
-        # 2. orphan cleanup (軽い)
-        if phase in ("all", "data-quality", "expand"):
+        # ---- data_quality (軽) ----
+        if phase in ("data_quality", "full_light", "all"):
             try:
-                results["orphan_cleanup"] = cleanup_orphan_pre_features()
+                results["data_quality"] = get_data_quality()
+            except Exception as e:
+                results["data_quality_error"] = str(e)
+
+        # ---- cleanup orphan (軽) ----
+        if phase in ("cleanup", "full_light", "all"):
+            try:
+                dq = results.get("data_quality") or {}
+                if dq.get("orphan_pre_features", 0) > 0 or phase == "cleanup":
+                    results["orphan_cleanup"] = cleanup_orphan_pre_features()
             except Exception as e:
                 results["orphan_cleanup_error"] = str(e)
 
-        # 3. expand training (chunk縮小: 15銘柄×1チャンク)
-        if phase in ("all", "expand"):
-            try:
-                results["expand_training"] = expand_training_chunked(
-                    market=market, chunk_size=15, max_chunks_per_run=1,
-                    priority_mode="all_eligible",
-                )
-            except Exception as e:
-                results["expand_training_error"] = str(e)
+        # ---- expand one chunk (重) ----
+        if phase in ("expand_one_chunk", "expand", "full_light", "all"):
+            if _elapsed() < max_seconds:
+                try:
+                    results["expand_training"] = expand_training_chunked(
+                        market=market, chunk_size=chunk_size, max_chunks_per_run=1,
+                        priority_mode="all_eligible",
+                    )
+                except Exception as e:
+                    results["expand_training_error"] = str(e)
+            else:
+                partial = True
 
-        # 4. candidates + auto-save (max_symbols縮小: 50)
-        if phase in ("all", "candidates"):
+        # ---- candidate_build (重) ----
+        if phase in ("candidate_build", "candidates", "full_light", "all"):
+            if _elapsed() < max_seconds:
+                try:
+                    results["candidate_build"] = build_and_save_candidates(
+                        market=market, max_symbols=50, min_similarity=0.4,
+                    )
+                except Exception as e:
+                    results["candidate_error"] = str(e)
+            else:
+                partial = True
+
+        # ---- auto_save (軽) ----
+        if phase in ("auto_save", "candidate_build", "candidates", "full_light", "all"):
             try:
-                results["candidate_build"] = build_and_save_candidates(
-                    market=market, max_symbols=50, min_similarity=0.4,
-                )
                 results["auto_save"] = auto_save_top_candidates(
                     market=market, limit=20, min_score=70.0,
                 )
             except Exception as e:
-                results["candidate_error"] = str(e)
+                results["auto_save_error"] = str(e)
 
-        # 5. review + training save (軽い: DBのみ)
-        if phase in ("all", "review"):
+        # ---- review (軽: DBのみ) ----
+        if phase in ("review_predictions", "review", "all"):
             try:
-                results["review"] = review_surge_20_predictions(limit=200)
-                results["training_save"] = save_surge_20_reviews_as_training()
+                results["review"] = review_surge_20_predictions(limit=50)
             except Exception as e:
                 results["review_error"] = str(e)
 
-        # 6. data-quality after
-        if phase in ("all", "data-quality"):
+        # ---- save reviews as training (軽) ----
+        if phase in ("save_reviews_as_training", "review", "all"):
             try:
-                results["data_quality_after"] = get_data_quality()
-            except Exception:
-                pass
+                results["training_save"] = save_surge_20_reviews_as_training()
+            except Exception as e:
+                results["training_save_error"] = str(e)
 
         _state_set_timestamp("surge20_last_orchestrator_at")
-        return {"status": "ok", "market": market, "phase": phase, "results": results}
+        status = "partial_complete" if partial else "completed"
+        return {"status": status, "market": market, "phase": phase,
+                "duration_sec": round(_elapsed(), 2), "results": results}
     finally:
-        _release_heavy()
+        if needs_lock:
+            _release_heavy()
 
 
 # ============== サマリ追加用 helper ==============

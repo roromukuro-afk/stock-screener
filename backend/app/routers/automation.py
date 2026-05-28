@@ -250,6 +250,42 @@ def auto_save_surge_20_predictions(req: TriggerRequest,
     )
 
 
+@router.post("/cleanup-stale-jobs")
+def cleanup_stale_jobs(req: TriggerRequest,
+                       x_cron_secret: Optional[str] = Header(None),
+                       authorization: Optional[str] = Header(None)):
+    _check_secret(x_cron_secret, authorization)
+    return automation.cleanup_stale_jobs(running_minutes=30)
+
+
+@router.post("/auto-save-surge-20-predictions")
+def auto_save_surge_20_predictions(req: TriggerRequest,
+                                    x_cron_secret: Optional[str] = Header(None),
+                                    authorization: Optional[str] = Header(None)):
+    """軽量auto-save (DBのcandidates_todayを読むだけ)。lock付き。"""
+    _check_secret(x_cron_secret, authorization)
+    from app.services import surge_20 as s20
+    lock_key = "surge20_auto_save_lock"
+    if not automation.acquire_db_lock(lock_key, owner=f"auto_save_{req.market}"):
+        return {"status": "busy", "lock": lock_key}
+    job_id = automation._create_job("auto-save-surge-20", req.market or "JP", req.trigger_type or "cron")
+    try:
+        result = s20.auto_save_top_candidates(market=req.market or "JP", limit=20, min_score=70.0)
+        automation._finish_job(
+            job_id, "completed",
+            predictions_saved=result.get("total_saved", 0),
+            positive_cases_created=result.get("main_saved", 0),
+            negative_cases_created=(result.get("rejected_watch_saved", 0) + result.get("late_chase_watch_saved", 0)),
+        )
+        return {"status": "ok", "job_id": job_id, **result}
+    except Exception as e:
+        automation._log_error(job_id, "", "auto_save", e)
+        automation._finish_job(job_id, "failed", error_message=str(e))
+        return {"status": "failed", "error": str(e)}
+    finally:
+        automation.release_db_lock(lock_key)
+
+
 @router.post("/review-surge-20-predictions")
 def review_surge_20_predictions(req: TriggerRequest,
                                  x_cron_secret: Optional[str] = Header(None),

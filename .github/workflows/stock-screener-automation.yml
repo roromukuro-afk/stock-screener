@@ -157,59 +157,62 @@ jobs:
             -w "\nHTTP %{http_code}\n" \
             "$BACKEND_URL/api/automation/save-reviews-as-training"
 
-      # ===== surge-20 専用 scheduled =====
-      - name: JST 16:30 JP - surge-20 expand cursor chunk + ranking + 1-day surge
+      # ===== surge-20 専用 scheduled (busy-aware / 軽量) =====
+      # 共通関数: busy(409)はskip扱い、例外のみfail。--max-time必須。
+      - name: JST 16:30 JP - cleanup + full_light orchestrator
         if: github.event_name == 'schedule' && github.event.schedule == '30 7 * * 1-5'
         run: |
-          set -e
-          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
-            -d '{"market":"JP","trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
-            "$BACKEND_URL/api/automation/run-surge-ranking-generation"
-          sleep 20
-          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
-            -d '{"market":"JP","trigger_type":"cron","max_symbols":200}' -w "\nHTTP %{http_code}\n" \
-            "$BACKEND_URL/api/automation/run-one-day-surge-detection"
-          sleep 20
-          # cursor付きexpand (JP)
-          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
-            -d '{"market":"JP","trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
-            "$BACKEND_URL/api/automation/run-surge-20-auto-orchestrator"
+          # 1. stale掃除 (軽い)
+          curl -sS --max-time 60 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/cleanup-stale-jobs" || echo "cleanup skipped"
+          # 2. full_light orchestrator (background即返し, chunk=20)
+          code=$(curl -sS --max-time 120 -o /tmp/r.json -w "%{http_code}" -X POST \
+            -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"cron"}' \
+            "$BACKEND_URL/api/automation/run-surge-20-auto-orchestrator")
+          echo "HTTP $code"; cat /tmp/r.json || true; echo
+          if [ "$code" = "409" ]; then echo "::notice::busy skip (not a failure)"; exit 0; fi
+          if [ "$code" -ge 500 ] 2>/dev/null; then echo "::error::server error"; exit 1; fi
 
-      - name: JST 17:30 JP - surge-20 candidate build + auto-save
+      - name: JST 17:30 JP - candidate build + auto-save (busy-aware)
         if: github.event_name == 'schedule' && github.event.schedule == '30 8 * * 1-5'
         run: |
-          set -e
-          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
-            -d '{"market":"JP","trigger_type":"cron","max_symbols":200}' -w "\nHTTP %{http_code}\n" \
-            "$BACKEND_URL/api/automation/run-surge-20-candidate-build"
-          sleep 60
-          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+          # busyチェック先行
+          safe=$(curl -sS --max-time 30 "$BACKEND_URL/api/surge-20/light-status" | grep -o '"render_safe_to_run":[a-z]*' || echo "unknown")
+          echo "render_safe: $safe"
+          curl -sS --max-time 120 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"JP","trigger_type":"cron","max_symbols":80}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/run-surge-20-candidate-build" || echo "candidate-build skip/busy"
+          sleep 90
+          # auto-save (軽量, DBのみ)
+          curl -sS --max-time 120 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
             -d '{"market":"JP","trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
-            "$BACKEND_URL/api/automation/auto-save-surge-20-predictions"
+            "$BACKEND_URL/api/automation/auto-save-surge-20-predictions" || echo "auto-save skip/busy"
 
-      - name: JST 08:00 US - surge-20 expand + 1-day
+      - name: JST 08:00 US - cleanup + full_light orchestrator (US)
         if: github.event_name == 'schedule' && github.event.schedule == '0 23 * * 0-4'
         run: |
-          set -e
-          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
-            -d '{"market":"US","trigger_type":"cron","max_symbols":150}' -w "\nHTTP %{http_code}\n" \
-            "$BACKEND_URL/api/automation/run-one-day-surge-detection"
-          sleep 30
-          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
-            -d '{"market":"US","trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
-            "$BACKEND_URL/api/automation/run-surge-20-auto-orchestrator"
+          curl -sS --max-time 60 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/cleanup-stale-jobs" || echo "cleanup skipped"
+          code=$(curl -sS --max-time 120 -o /tmp/r.json -w "%{http_code}" -X POST \
+            -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -d '{"market":"US","trigger_type":"cron"}' \
+            "$BACKEND_URL/api/automation/run-surge-20-auto-orchestrator")
+          echo "HTTP $code"; cat /tmp/r.json || true; echo
+          if [ "$code" = "409" ]; then echo "::notice::busy skip"; exit 0; fi
 
-      - name: JST 09:30 surge-20 review + training save
+      - name: JST 09:30 surge-20 review + training save (軽量)
         if: github.event_name == 'schedule' && github.event.schedule == '30 0 * * 1-5'
         run: |
-          set -e
-          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+          curl -sS --max-time 120 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
             -d '{"trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
-            "$BACKEND_URL/api/automation/review-surge-20-predictions"
+            "$BACKEND_URL/api/automation/review-surge-20-predictions" || echo "review skip/busy"
           sleep 30
-          curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+          curl -sS --max-time 120 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
             -d '{"trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
-            "$BACKEND_URL/api/automation/save-surge-20-reviews-as-training"
+            "$BACKEND_URL/api/automation/save-surge-20-reviews-as-training" || echo "save skip/busy"
 
       - name: Weekend JST 23:00 - training builder
         if: github.event_name == 'schedule' && github.event.schedule == '0 14 * * 0,6'

@@ -17,6 +17,145 @@ from app.services import (
 )
 
 
+# ===================================================================
+# DBベース lock (Render再起動/複数リクエストでも安定)
+# ===================================================================
+LOCK_TTL = {
+    "surge20_global_heavy_lock": 600,
+    "surge20_expand_training_lock": 480,
+    "surge20_candidate_build_lock": 300,
+    "surge20_auto_save_lock": 120,
+    "surge20_review_lock": 300,
+    "surge20_training_save_lock": 300,
+    "surge20_orchestrator_lock": 600,
+}
+
+
+def acquire_db_lock(lock_key: str, ttl_seconds: int = None, owner: str = "cron") -> bool:
+    """DBベースのlock取得。取れたらTrue。busyならFalse。期限切れは奪取。"""
+    from app.models.models import AutomationLock
+    if ttl_seconds is None:
+        ttl_seconds = LOCK_TTL.get(lock_key, 300)
+    now = datetime.utcnow()
+    db: Session = SessionLocal()
+    try:
+        row = db.query(AutomationLock).filter(AutomationLock.lock_key == lock_key).first()
+        if row:
+            # 期限切れチェック
+            if row.expires_at and row.expires_at > now:
+                return False  # まだ有効 → busy
+            # 期限切れ → 奪取
+            row.locked_by = owner
+            row.locked_at = now
+            row.expires_at = now + timedelta(seconds=ttl_seconds)
+            db.commit()
+            return True
+        # 新規
+        db.add(AutomationLock(
+            lock_key=lock_key, locked_by=owner,
+            locked_at=now, expires_at=now + timedelta(seconds=ttl_seconds),
+        ))
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        return False
+    finally:
+        db.close()
+
+
+def release_db_lock(lock_key: str):
+    from app.models.models import AutomationLock
+    db: Session = SessionLocal()
+    try:
+        db.query(AutomationLock).filter(AutomationLock.lock_key == lock_key).delete()
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
+
+def is_db_locked(lock_key: str) -> bool:
+    from app.models.models import AutomationLock
+    now = datetime.utcnow()
+    db: Session = SessionLocal()
+    try:
+        row = db.query(AutomationLock).filter(AutomationLock.lock_key == lock_key).first()
+        return bool(row and row.expires_at and row.expires_at > now)
+    finally:
+        db.close()
+
+
+def list_active_locks() -> List[Dict]:
+    from app.models.models import AutomationLock
+    now = datetime.utcnow()
+    db: Session = SessionLocal()
+    try:
+        rows = db.query(AutomationLock).all()
+        active = []
+        stale = []
+        for r in rows:
+            d = {"lock_key": r.lock_key, "locked_by": r.locked_by,
+                 "locked_at": r.locked_at.isoformat() if r.locked_at else None,
+                 "expires_at": r.expires_at.isoformat() if r.expires_at else None}
+            if r.expires_at and r.expires_at > now:
+                active.append(d)
+            else:
+                stale.append(d)
+        return {"active": active, "stale": stale}
+    finally:
+        db.close()
+
+
+def cleanup_stale_jobs(running_minutes: int = 30) -> Dict:
+    """running のまま長時間放置されたjobをstale_failedに + 期限切れlock解除"""
+    from app.models.models import AutomationLock
+    now = datetime.utcnow()
+    cutoff = now - timedelta(minutes=running_minutes)
+    db: Session = SessionLocal()
+    stale_jobs = 0
+    released_locks = 0
+    try:
+        # stale running jobs
+        rows = (db.query(AutomationJob)
+                .filter(AutomationJob.status == "running")
+                .filter(AutomationJob.started_at < cutoff).all())
+        for j in rows:
+            j.status = "stale_failed"
+            j.finished_at = now
+            j.error_message = f"auto-cleaned: running > {running_minutes}min"
+            stale_jobs += 1
+        # expired locks
+        lock_rows = db.query(AutomationLock).all()
+        for lk in lock_rows:
+            if not lk.expires_at or lk.expires_at <= now:
+                db.delete(lk)
+                released_locks += 1
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return {"status": "failed", "error": str(e)}
+    finally:
+        db.close()
+
+    # in-memory lock も解除
+    try:
+        from app.services import surge_20 as s20
+        if s20.is_heavy_running():
+            hs = s20.heavy_status()
+            # started_at が古ければ強制解除
+            if hs.get("started_at"):
+                started = datetime.fromisoformat(hs["started_at"])
+                if (now - started).total_seconds() > running_minutes * 60:
+                    s20._release_heavy()
+    except Exception:
+        pass
+
+    set_setting("latest_stale_cleanup_at", now.isoformat())
+    return {"status": "ok", "stale_jobs_cleaned": stale_jobs, "locks_released": released_locks}
+
+
 def _create_job(job_type: str, market: str, trigger_type: str = "cron") -> int:
     db: Session = SessionLocal()
     try:
@@ -286,18 +425,21 @@ def run_one_day_surge_detection(market: str = "JP", trigger_type: str = "cron", 
 
 
 def run_surge_20_auto_orchestrator(market: str = "JP", trigger_type: str = "cron",
-                                    phase: str = "all") -> Dict:
+                                    phase: str = "full_light", chunk_size: int = 20) -> Dict:
     from app.services import surge_20
     job_id = _create_job(f"surge-20-orchestrator/{phase}", market, trigger_type)
     try:
-        r = surge_20.run_auto_orchestrator(market=market, phase=phase)
+        r = surge_20.run_auto_orchestrator(market=market, phase=phase, chunk_size=chunk_size)
+        if r.get("status") == "busy":
+            _finish_job(job_id, "skipped_busy", error_message="another heavy job running")
+            return {"status": "skipped_busy", "job_id": job_id}
         # aggregate counters
         expand = (r.get("results") or {}).get("expand_training") or {}
         cb = (r.get("results") or {}).get("candidate_build") or {}
         autosave = (r.get("results") or {}).get("auto_save") or {}
         review = (r.get("results") or {}).get("review") or {}
         train = (r.get("results") or {}).get("training_save") or {}
-        _finish_job(job_id, "completed",
+        _finish_job(job_id, r.get("status", "completed"),
                     total_symbols=expand.get("processed_symbols", 0),
                     detected_surge_count=expand.get("events_saved", 0),
                     positive_cases_created=expand.get("features_created", 0) + train.get("positive_saved", 0),
@@ -481,6 +623,13 @@ def get_automation_status() -> Dict:
 
         cron_secret_env = bool(os.getenv("CRON_SECRET"))
         cron_secret_db = bool(_get_setting("cron_secret_marker"))
+        # stale/lock 情報 (軽量)
+        from datetime import timedelta as _td
+        stale_cutoff = datetime.utcnow() - _td(minutes=30)
+        stale_running = (db.query(AutomationJob)
+                         .filter(AutomationJob.status == "running")
+                         .filter(AutomationJob.started_at < stale_cutoff).count())
+        locks_info = list_active_locks()
         return {
             "automation_enabled": _get_setting("automation_enabled", "true") == "true",
             # 後方互換用 (既存UIが見ているフィールド)
@@ -498,6 +647,10 @@ def get_automation_status() -> Dict:
             "latest_success_at": latest_success.started_at.isoformat() if latest_success else None,
             "latest_failure_at": latest_failure.started_at.isoformat() if latest_failure else None,
             "running_jobs": running,
+            "stale_running_jobs": stale_running,
+            "active_locks": locks_info.get("active", []),
+            "stale_locks": locks_info.get("stale", []),
+            "latest_stale_cleanup_at": _get_setting("latest_stale_cleanup_at"),
             "today": today_summary,
             "today_summary": today_summary,
             "training_data_balance": _get_training_balance(),

@@ -473,6 +473,12 @@ def heavy_status():
     return clean_for_json(surge_20.heavy_status())
 
 
+@router.get("/light-status")
+def light_status():
+    """高負荷時でも返る軽量status (最小限のCOUNT)"""
+    return clean_for_json(surge_20.get_light_status())
+
+
 class AutoSaveRequest(BaseModel):
     market: str = "JP"
     limit: int = 20
