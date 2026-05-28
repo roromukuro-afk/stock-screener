@@ -966,6 +966,13 @@ def build_and_save_candidates(market: str = "JP", max_symbols: int = 200,
                         .filter(Surge20Candidate.candidate_date == today)
                         .first())
             score = (c.get("positive_similarity") or 0) * 100
+            cp = c.get("current_price")
+            # entry/stop/target の簡易算出 (現値ベース)
+            entry_low = round(cp * 0.97, 2) if cp else None
+            entry_high = round(cp * 1.01, 2) if cp else None
+            stop = round(cp * 0.92, 2) if cp else None
+            tp1 = round(cp * 1.10, 2) if cp else None
+            tp2 = round(cp * 1.20, 2) if cp else None
             payload = {
                 "symbol": c["symbol"],
                 "market": c.get("market") or market,
@@ -974,7 +981,12 @@ def build_and_save_candidates(market: str = "JP", max_symbols: int = 200,
                 "final_surge_20_score": score,
                 "candidate_label": c.get("candidate_label"),
                 "prediction_horizon": "within_20d",
-                "current_price": c.get("current_price"),
+                "current_price": cp,
+                "entry_zone_low": entry_low,
+                "entry_zone_high": entry_high,
+                "stop_loss": stop,
+                "first_target": tp1,
+                "second_target": tp2,
                 "support_distance": c.get("support_distance"),
                 "resistance_upside": c.get("resistance_upside"),
                 "positive_similarity": c.get("positive_similarity"),
@@ -1833,7 +1845,7 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
             "symbol": sym,
             "name": s.get("name"),
             "market": market_s,
-            "current_price": current.get("close"),
+            "current_price": current.get("t1_close") or current.get("close"),
             "positive_similarity": round(positive_sim, 4),
             "negative_similarity": round(negative_sim, 4),
             "similarity_diff": round(positive_sim - negative_sim, 4),
