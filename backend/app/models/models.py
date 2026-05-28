@@ -849,6 +849,9 @@ class PredictionLog(Base):
     prediction_horizon = Column(String, default="next_day")
     # next_day / within_3d / within_5d / within_10d / within_20d / within_1m
     target_return = Column(Float, default=20.0)  # 目標到達率 (%)
+    # watch保存対応
+    auto_trade_candidate = Column(Boolean, default=True)
+    watch_only = Column(Boolean, default=False)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

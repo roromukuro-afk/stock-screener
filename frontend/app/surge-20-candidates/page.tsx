@@ -40,6 +40,8 @@ export default function Surge20CandidatesPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  const [autoSaveResult, setAutoSaveResult] = useState<any>(null);
+
   const buildCandidates = async () => {
     setLoading(true); setError(null);
     try {
@@ -48,6 +50,33 @@ export default function Surge20CandidatesPage() {
         body: JSON.stringify({ market, max_symbols: maxSymbols }),
       });
       setData(r);
+    } catch (e: any) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const runAutoSave = async () => {
+    setLoading(true); setError(null);
+    try {
+      const r = await fetchAPI("/api/surge-20/auto-save-top-candidates", {
+        method: "POST",
+        body: JSON.stringify({ market, limit: 20, min_score: 70 }),
+      });
+      setAutoSaveResult(r);
+      await load();
+    } catch (e: any) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const runOrchestrator = async () => {
+    setLoading(true); setError(null);
+    try {
+      const r = await fetchAPI("/api/surge-20/run-auto-orchestrator", {
+        method: "POST",
+        body: JSON.stringify({ market, phase: "all" }),
+      });
+      setAutoSaveResult({ orchestrator: r });
+      // 90秒後にreload
+      setTimeout(load, 90000);
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
   };
@@ -152,9 +181,35 @@ export default function Surge20CandidatesPage() {
           </div>
           <button onClick={buildCandidates} disabled={loading}
             className="px-5 py-2 bg-emerald-600 text-white rounded text-sm hover:bg-emerald-700 disabled:opacity-50">
-            {loading ? "計算中..." : "🌅 20%到達候補を生成"}
+            {loading ? "計算中..." : "🌅 候補生成"}
+          </button>
+          <button onClick={runAutoSave} disabled={loading}
+            className="px-5 py-2 bg-fuchsia-600 text-white rounded text-sm hover:bg-fuchsia-700 disabled:opacity-50">
+            💾 本命+watch自動保存
+          </button>
+          <button onClick={runOrchestrator} disabled={loading}
+            className="px-5 py-2 bg-indigo-600 text-white rounded text-sm hover:bg-indigo-700 disabled:opacity-50">
+            🤖 orchestrator全フェーズ
           </button>
         </div>
+        {autoSaveResult && (
+          <div className="mt-3 p-3 bg-fuchsia-50 border border-fuchsia-200 rounded text-xs">
+            <p className="font-bold text-fuchsia-700 mb-1">📊 auto-save結果</p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div>main_saved: <strong className="text-emerald-700">{autoSaveResult.main_saved ?? "-"}</strong></div>
+              <div>watch_saved: <strong className="text-blue-700">{autoSaveResult.watch_saved ?? "-"}</strong></div>
+              <div>rejected_watch_saved: <strong className="text-gray-700">{autoSaveResult.rejected_watch_saved ?? "-"}</strong></div>
+              <div>late_chase_watch_saved: <strong className="text-orange-700">{autoSaveResult.late_chase_watch_saved ?? "-"}</strong></div>
+              <div>skipped_duplicate: {autoSaveResult.skipped_duplicate ?? "-"}</div>
+              <div>skipped_data_quality: {autoSaveResult.skipped_data_quality ?? "-"}</div>
+              <div>skipped_error: {autoSaveResult.skipped_error ?? "-"}</div>
+              <div>total_saved: <strong>{autoSaveResult.total_saved ?? "-"}</strong></div>
+            </div>
+            {autoSaveResult.orchestrator && (
+              <p className="mt-2 text-indigo-700">orchestrator: {autoSaveResult.orchestrator.message}</p>
+            )}
+          </div>
+        )}
         {error && <p className="text-red-600 mt-2 text-sm">{error}</p>}
         {data?.status === "no_library" && (
           <p className="text-orange-600 mt-2 text-sm">

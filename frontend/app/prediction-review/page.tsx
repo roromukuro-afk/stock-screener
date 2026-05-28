@@ -119,14 +119,56 @@ export default function PredictionReviewPage() {
         </div>
       </div>
 
-      {/* surge_20専用パネル */}
+      {/* surge_20専用パネル (本命 + watch + rejected + late_chase) */}
       {surge20Perf && (
         <div className="card p-4 border-l-4 border-emerald-400">
-          <h2 className="font-bold text-emerald-800 mb-3">🌅 surge_20_prediction 専用成績</h2>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm mb-3">
-            <div><p className="text-xs text-gray-500">total</p><p className="text-2xl font-bold">{surge20Perf.total_surge_20_predictions}</p></div>
+          <h2 className="font-bold text-emerald-800 mb-3">🌅 surge_20 全prediction_type 成績</h2>
+          <p className="text-xs text-gray-500 mb-3">
+            本命20%到達候補だけでなく、見送り判断・後追い警戒判断も検証対象として保存されています。
+            watch系は分析・検証目的であり投資推奨ではありません。
+          </p>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm mb-3">
+            <div><p className="text-xs text-gray-500">total</p><p className="text-2xl font-bold">{surge20Perf.total_predictions ?? surge20Perf.total_surge_20_predictions}</p></div>
+            <div>
+              <p className="text-xs text-gray-500">本命</p>
+              <p className="text-2xl font-bold text-emerald-700">{surge20Perf.by_prediction_type?.surge_20_prediction ?? surge20Perf.total_surge_20_predictions ?? 0}</p>
+            </div>
+            <div>
+              <p className="text-xs text-gray-500">watch</p>
+              <p className="text-2xl font-bold text-blue-600">{surge20Perf.by_prediction_type?.surge_20_watch_prediction ?? 0}</p>
+            </div>
+            <div>
+              <p className="text-xs text-gray-500">rejected</p>
+              <p className="text-2xl font-bold text-gray-600">{surge20Perf.by_prediction_type?.surge_20_rejected_watch ?? 0}</p>
+            </div>
+            <div>
+              <p className="text-xs text-gray-500">late_chase</p>
+              <p className="text-2xl font-bold text-orange-600">{surge20Perf.by_prediction_type?.surge_20_late_chase_watch ?? 0}</p>
+            </div>
             <div><p className="text-xs text-gray-500">saved as training</p><p className="text-2xl font-bold text-fuchsia-600">{surge20Perf.saved_as_training}</p></div>
           </div>
+          {/* prediction_type別 result_label 内訳 */}
+          {surge20Perf.by_type_and_label && (
+            <div className="space-y-2 mb-3">
+              {Object.entries(surge20Perf.by_type_and_label).map(([pt, labels]: [string, any]) => (
+                <div key={pt} className={`p-2 rounded ${
+                  pt === "surge_20_prediction" ? "bg-emerald-50" :
+                  pt === "surge_20_watch_prediction" ? "bg-blue-50" :
+                  pt === "surge_20_rejected_watch" ? "bg-gray-50" :
+                  pt === "surge_20_late_chase_watch" ? "bg-orange-50" : "bg-gray-100"
+                }`}>
+                  <p className="text-xs font-bold mb-1">{pt}</p>
+                  <div className="flex flex-wrap gap-1 text-xs">
+                    {Object.entries(labels).map(([k, v]: [string, any]) => (
+                      <span key={k} className="px-2 py-0.5 bg-white rounded border border-gray-200">
+                        {k}: <strong>{v}</strong>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
           {surge20Perf.by_result_label && Object.keys(surge20Perf.by_result_label).length > 0 && (
             <div className="flex flex-wrap gap-2 text-xs mb-3">
               {Object.entries(surge20Perf.by_result_label).map(([k, v]: [string, any]) => {

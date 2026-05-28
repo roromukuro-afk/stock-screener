@@ -1011,16 +1011,71 @@ def build_and_save_candidates(market: str = "JP", max_symbols: int = 200,
     }
 
 
-AUTO_SAVE_LABELS = {
+MAIN_AUTO_SAVE_LABELS = {
     "本命20%到達候補", "20日以内20%候補", "1か月以内20%候補",
+}
+WATCH_AUTO_SAVE_LABELS = {
     "出来高初動候補", "二段目候補", "押し目再上昇候補",
 }
-AUTO_SAVE_MAX_PER_DAY = 20
+REJECTED_WATCH_LABEL = "見送り"
+LATE_CHASE_WATCH_LABELS = {"上がり切り警戒", "後追い危険"}
+NEGATIVE_SIM_WATCH_LABEL = "negative類似高め"
+
+AUTO_SAVE_MAX_MAIN_PER_DAY = 20
+AUTO_SAVE_MAX_WATCH_PER_DAY = 50
+
+
+def _classify_save_type(c) -> Optional[tuple]:
+    """候補を4種類のprediction_typeに分類し、(type, auto_trade_candidate, watch_only) を返す
+    本命: surge_20_prediction
+    watch: surge_20_watch_prediction
+    rejected: surge_20_rejected_watch
+    late_chase: surge_20_late_chase_watch
+    None: 保存しない (条件不足など)
+    """
+    label = c.candidate_label or ""
+    score = c.final_surge_20_score or 0
+    neg_sim = c.negative_similarity or 0
+    overext = c.overextension_score or 0
+    upside = c.resistance_upside or 0
+
+    # 本命条件 (全て満たす場合のみ main)
+    main_ok = (
+        score >= 70 and
+        label in MAIN_AUTO_SAVE_LABELS and
+        neg_sim < 0.65 and
+        overext < 70 and
+        upside >= 10 and
+        c.current_price and c.current_price > 0
+    )
+    if main_ok:
+        return ("surge_20_prediction", True, False)
+
+    # late_chase系
+    if label in LATE_CHASE_WATCH_LABELS:
+        return ("surge_20_late_chase_watch", False, True)
+
+    # 見送り
+    if label == REJECTED_WATCH_LABEL:
+        return ("surge_20_rejected_watch", False, True)
+
+    # watch系: 出来高初動/二段目/押し目再上昇/negative類似高め/本命系だが条件未達
+    if label in WATCH_AUTO_SAVE_LABELS or label == NEGATIVE_SIM_WATCH_LABEL:
+        return ("surge_20_watch_prediction", False, True)
+
+    # 本命系の条件付き (score>=70だが他の条件未達)
+    if label in MAIN_AUTO_SAVE_LABELS and score >= 70:
+        return ("surge_20_watch_prediction", False, True)
+
+    return None
 
 
 def auto_save_top_candidates(market: str = "JP", limit: int = 20,
                               min_score: float = 70.0) -> Dict:
-    """surge_20_candidates から条件を満たすものを prediction_logs に自動保存"""
+    """surge_20_candidates から4種類のprediction_typeで自動保存
+    - main: 本命20件まで
+    - watch / rejected / late_chase: 合計50件まで
+    """
     from app.models.models import Surge20Candidate, PredictionLog
     today = date.today().isoformat()
 
@@ -1029,45 +1084,77 @@ def auto_save_top_candidates(market: str = "JP", limit: int = 20,
         cands = (db.query(Surge20Candidate)
                  .filter(Surge20Candidate.market == market)
                  .filter(Surge20Candidate.candidate_date == today)
-                 .filter(Surge20Candidate.final_surge_20_score >= min_score)
                  .filter(Surge20Candidate.auto_saved_as_prediction == False)
                  .order_by(Surge20Candidate.final_surge_20_score.desc())
                  .all())
     finally:
         db.close()
 
-    saved = 0
-    skipped = 0
-    for c in cands:
-        if saved >= limit or saved >= AUTO_SAVE_MAX_PER_DAY:
-            break
-        # フィルター
-        if c.candidate_label not in AUTO_SAVE_LABELS:
-            skipped += 1; continue
-        if (c.negative_similarity or 0) >= 0.65:
-            skipped += 1; continue
-        if (c.overextension_score or 0) >= 70:
-            skipped += 1; continue
-        if (c.resistance_upside or 0) < 10:
-            skipped += 1; continue
-        if not c.current_price or c.current_price <= 0:
-            skipped += 1; continue
+    main_saved = 0
+    watch_saved = 0
+    rejected_watch_saved = 0
+    late_chase_watch_saved = 0
+    skipped_duplicate = 0
+    skipped_data_quality = 0
+    skipped_error = 0
 
-        # 直近5営業日以内に同じsymbolのopen予測あれば skip
+    for c in cands:
+        # 上限チェック
+        if (main_saved >= AUTO_SAVE_MAX_MAIN_PER_DAY and
+            (watch_saved + rejected_watch_saved + late_chase_watch_saved) >= AUTO_SAVE_MAX_WATCH_PER_DAY):
+            break
+
+        # 必須データ
+        if not c.current_price or c.current_price <= 0:
+            skipped_data_quality += 1
+            continue
+
+        classification = _classify_save_type(c)
+        if not classification:
+            skipped_data_quality += 1
+            continue
+
+        pred_type, auto_trade, watch_only = classification
+
+        # 上限グループ別チェック
+        if pred_type == "surge_20_prediction" and main_saved >= AUTO_SAVE_MAX_MAIN_PER_DAY:
+            continue
+        if pred_type != "surge_20_prediction":
+            total_watch = watch_saved + rejected_watch_saved + late_chase_watch_saved
+            if total_watch >= AUTO_SAVE_MAX_WATCH_PER_DAY:
+                continue
+
+        # 同一symbol + prediction_date + prediction_type の重複チェック
         check_db = SessionLocal()
         try:
-            from datetime import timedelta as td
-            five_days_ago = (date.today() - td(days=7)).isoformat()
-            recent = (check_db.query(PredictionLog)
-                      .filter(PredictionLog.symbol == c.symbol)
-                      .filter(PredictionLog.prediction_type == "surge_20_prediction")
-                      .filter(PredictionLog.status == "open")
-                      .filter(PredictionLog.prediction_date >= five_days_ago)
-                      .first())
-            if recent:
-                skipped += 1; continue
+            existing = (check_db.query(PredictionLog)
+                        .filter(PredictionLog.symbol == c.symbol)
+                        .filter(PredictionLog.prediction_date == today)
+                        .filter(PredictionLog.prediction_type == pred_type)
+                        .first())
+            if existing:
+                skipped_duplicate += 1
+                continue
         finally:
             check_db.close()
+
+        # 本命だけ、直近7日open重複チェック
+        if pred_type == "surge_20_prediction":
+            check2 = SessionLocal()
+            try:
+                from datetime import timedelta as td
+                seven_days_ago = (date.today() - td(days=7)).isoformat()
+                recent = (check2.query(PredictionLog)
+                          .filter(PredictionLog.symbol == c.symbol)
+                          .filter(PredictionLog.prediction_type == "surge_20_prediction")
+                          .filter(PredictionLog.status == "open")
+                          .filter(PredictionLog.prediction_date >= seven_days_ago)
+                          .first())
+                if recent:
+                    skipped_duplicate += 1
+                    continue
+            finally:
+                check2.close()
 
         # 保存
         save_db = SessionLocal()
@@ -1080,10 +1167,12 @@ def auto_save_top_candidates(market: str = "JP", limit: int = 20,
                 jpy_price_at_prediction=c.current_price,
                 prediction_label=c.candidate_label,
                 final_prediction_score=c.final_surge_20_score,
-                prediction_type="surge_20_prediction",
+                prediction_type=pred_type,
                 prediction_horizon="within_20d",
                 target_return=20.0,
-                entry_type="surge_20_auto",
+                auto_trade_candidate=auto_trade,
+                watch_only=watch_only,
+                entry_type="surge_20_auto" if not watch_only else "watch_only",
                 entry_zone_a_low=c.entry_zone_low,
                 entry_zone_a_high=c.entry_zone_high,
                 stop_loss_price=c.stop_loss,
@@ -1098,22 +1187,45 @@ def auto_save_top_candidates(market: str = "JP", limit: int = 20,
             save_db.add(log); save_db.flush()
             log_id = log.id
 
-            # 元 candidate を更新
-            cand_db_row = save_db.query(Surge20Candidate).filter(Surge20Candidate.id == c.id).first()
-            if cand_db_row:
-                cand_db_row.auto_saved_as_prediction = True
-                cand_db_row.prediction_log_id = log_id
+            # main の場合のみ candidate.auto_saved_as_prediction=True
+            if pred_type == "surge_20_prediction":
+                cand_db_row = save_db.query(Surge20Candidate).filter(Surge20Candidate.id == c.id).first()
+                if cand_db_row:
+                    cand_db_row.auto_saved_as_prediction = True
+                    cand_db_row.prediction_log_id = log_id
             save_db.commit()
-            saved += 1
+
+            if pred_type == "surge_20_prediction":
+                main_saved += 1
+            elif pred_type == "surge_20_watch_prediction":
+                watch_saved += 1
+            elif pred_type == "surge_20_rejected_watch":
+                rejected_watch_saved += 1
+            elif pred_type == "surge_20_late_chase_watch":
+                late_chase_watch_saved += 1
         except Exception as e:
             save_db.rollback()
-            print(f"auto-save {c.symbol} failed: {e}")
+            skipped_error += 1
+            print(f"auto-save {c.symbol} ({pred_type}) failed: {e}")
         finally:
             save_db.close()
 
     _state_set_timestamp(f"surge20_{market.lower()}_last_auto_save_at")
-    return {"status": "ok", "market": market, "candidates_checked": len(cands),
-            "saved": saved, "skipped": skipped}
+    return {
+        "status": "ok", "market": market,
+        "candidates_checked": len(cands),
+        "main_saved": main_saved,
+        "watch_saved": watch_saved,
+        "rejected_watch_saved": rejected_watch_saved,
+        "late_chase_watch_saved": late_chase_watch_saved,
+        "total_saved": main_saved + watch_saved + rejected_watch_saved + late_chase_watch_saved,
+        "skipped_duplicate": skipped_duplicate,
+        "skipped_data_quality": skipped_data_quality,
+        "skipped_error": skipped_error,
+        # 後方互換
+        "saved": main_saved,
+        "skipped": skipped_duplicate + skipped_data_quality + skipped_error,
+    }
 
 
 # ============== Auto Orchestrator ==============
@@ -1247,37 +1359,83 @@ def save_candidate_as_prediction(body: Dict) -> Dict:
 
 
 def _classify_surge_20_result(predicted_at: str, max_gain: float, max_drawdown: float,
-                              hit_20: bool, stop_loss_hit: bool, elapsed_days: int) -> tuple:
-    """surge_20_prediction 専用判定。result_label と failure_reason を返す"""
+                              hit_20: bool, stop_loss_hit: bool, elapsed_days: int,
+                              prediction_type: str = "surge_20_prediction") -> tuple:
+    """surge_20系の結果判定。prediction_type別に解釈を変える
+    Returns (result_label, failure_reason)
+    """
     if elapsed_days < 5:
         return "still_open", None
     if elapsed_days < 20 and not hit_20 and not stop_loss_hit:
         return "insufficient_days", None
 
-    if stop_loss_hit and not hit_20:
-        return "stopped_out", "stopped_out"
+    # 本命: 成功 = +20% / 失敗 = +10%未満
+    if prediction_type == "surge_20_prediction":
+        if stop_loss_hit and not hit_20:
+            return "stopped_out", "stopped_out"
+        if hit_20:
+            if elapsed_days <= 5:
+                return "high_quality_success_20_within_5d", None
+            if elapsed_days <= 10:
+                return "success_20_within_10d", None
+            return "success_20_within_20d", None
+        if max_gain >= 15:
+            return "conditional_success_15", None
+        if max_gain >= 10:
+            return "short_reaction_success_10", None
+        return "failed_under_10", "failed_under_10"
+
+    # 見送り: +20%未達 = 見送り正解 / +20%到達 = 見送り失敗
+    if prediction_type == "surge_20_rejected_watch":
+        if hit_20:
+            return "rejected_watch_missed_positive", "missed_positive"
+        if max_gain < 10:
+            return "rejected_watch_correct", None
+        if max_gain < 20:
+            return "rejected_watch_partial", None
+        return "rejected_watch_correct", None
+
+    # 後追い警戒: 下落・横ばい = 警戒正解 / +20%到達 = 後追い警戒ミス(=二段目)
+    if prediction_type == "surge_20_late_chase_watch":
+        if hit_20:
+            return "late_chase_missed_continuation", "missed_continuation_surge"
+        if max_drawdown <= -10 or max_gain < 5:
+            return "late_chase_correct", None
+        if max_gain < 10:
+            return "late_chase_correct", None
+        return "late_chase_partial", None
+
+    # 条件付きwatch: +20%到達 = 条件付き成功 / +10〜20% = 短期反応 / +10%未満 = 失敗
+    if prediction_type == "surge_20_watch_prediction":
+        if hit_20:
+            return "watch_conditional_success", None
+        if max_gain >= 15:
+            return "watch_short_reaction_15", None
+        if max_gain >= 10:
+            return "watch_short_reaction_10", None
+        return "watch_failed_under_10", "watch_failed_under_10"
+
+    # fallback
     if hit_20:
-        if elapsed_days <= 5:
-            return "high_quality_success_20_within_5d", None
-        if elapsed_days <= 10:
-            return "success_20_within_10d", None
         return "success_20_within_20d", None
-    if max_gain >= 15:
-        return "conditional_success_15", None
-    if max_gain >= 10:
-        return "short_reaction_success_10", None
     return "failed_under_10", "failed_under_10"
 
 
+SURGE_20_PREDICTION_TYPES = (
+    "surge_20_prediction", "surge_20_watch_prediction",
+    "surge_20_rejected_watch", "surge_20_late_chase_watch",
+)
+
+
 def review_surge_20_predictions(limit: int = 200) -> Dict:
-    """surge_20_prediction の T+5/T+10/T+20 検証 + result_label保存"""
+    """surge_20系全prediction_type の T+5/T+10/T+20 検証 + result_label保存"""
     from app.models.models import PredictionLog, PredictionOutcome, PredictionReview
     from datetime import date, datetime as dt
 
     db = SessionLocal()
     try:
         logs = (db.query(PredictionLog)
-                .filter(PredictionLog.prediction_type == "surge_20_prediction")
+                .filter(PredictionLog.prediction_type.in_(SURGE_20_PREDICTION_TYPES))
                 .limit(limit).all())
         log_ids = [l.id for l in logs]
     finally:
@@ -1320,8 +1478,35 @@ def review_surge_20_predictions(limit: int = 200) -> Dict:
             stop_hit = bool(log.stop_loss_price and min_lo <= log.stop_loss_price)
 
             result_label, failure_reason = _classify_surge_20_result(
-                log.prediction_date, max_gain, max_dd, hit_20, stop_hit, elapsed
+                log.prediction_date, max_gain, max_dd, hit_20, stop_hit, elapsed,
+                prediction_type=log.prediction_type or "surge_20_prediction",
             )
+
+            # prediction_type別の教師データ化フラグ
+            pos_labels = (
+                "high_quality_success_20_within_5d",
+                "success_20_within_10d",
+                "success_20_within_20d",
+                "conditional_success_15",
+                # 後追い警戒ミス = 二段目positive
+                "late_chase_missed_continuation",
+                # 見送りミス = positive取り逃し
+                "rejected_watch_missed_positive",
+                # 条件付きwatch成功
+                "watch_conditional_success",
+            )
+            neg_labels = (
+                "failed_under_10",
+                "stopped_out",
+                "late_chase_only",
+                "watch_failed_under_10",
+                # 後追い警戒正解 = late_chase_negative
+                "late_chase_correct",
+                # 見送り正解 = negative回避ロジック成功
+                "rejected_watch_correct",
+            )
+            should_pos = result_label in pos_labels
+            should_neg = result_label in neg_labels
 
             # PredictionReview に保存
             db.query(PredictionReview).filter(PredictionReview.prediction_log_id == lid).delete()
@@ -1338,9 +1523,9 @@ def review_surge_20_predictions(limit: int = 200) -> Dict:
                 stop_loss_hit=stop_hit,
                 entry_plan_worked=hit_20 or max_gain >= 15,
                 failed_reason_category=failure_reason,
-                ai_review_comment=f"surge_20 review: elapsed={elapsed}d max_gain={max_gain:.2f}% max_dd={max_dd:.2f}% result={result_label}",
-                should_save_as_positive_training=result_label in ("high_quality_success_20_within_5d", "success_20_within_10d", "success_20_within_20d", "conditional_success_15"),
-                should_save_as_negative_training=result_label in ("failed_under_10", "stopped_out", "late_chase_only"),
+                ai_review_comment=f"{log.prediction_type} review: elapsed={elapsed}d max_gain={max_gain:.2f}% max_dd={max_dd:.2f}% result={result_label}",
+                should_save_as_positive_training=should_pos,
+                should_save_as_negative_training=should_neg,
                 saved_as_training=False,
             )
             db.add(rev)
@@ -1459,34 +1644,40 @@ def save_surge_20_reviews_as_training() -> Dict:
 
 
 def get_surge_20_prediction_performance() -> Dict:
-    """surge_20_prediction の検証結果集計"""
+    """surge_20系 全prediction_type の検証結果集計"""
     from app.models.models import PredictionLog, PredictionReview
 
     db = SessionLocal()
     try:
         logs = (db.query(PredictionLog)
-                .filter(PredictionLog.prediction_type == "surge_20_prediction").all())
+                .filter(PredictionLog.prediction_type.in_(SURGE_20_PREDICTION_TYPES)).all())
         log_ids = [l.id for l in logs]
         reviews = (db.query(PredictionReview)
                    .filter(PredictionReview.prediction_log_id.in_(log_ids)).all()) if log_ids else []
         rev_by_log = {r.prediction_log_id: r for r in reviews}
 
-        by_label: Dict = {}
+        # prediction_type 別 + result_label別
+        by_type_total: Dict = {}
+        by_type_label: Dict = {}
         saved_training = 0
         for log in logs:
+            pt = log.prediction_type or "unknown"
+            by_type_total[pt] = by_type_total.get(pt, 0) + 1
             rev = rev_by_log.get(log.id)
-            if not rev:
-                by_label["未検証"] = by_label.get("未検証", 0) + 1
-                continue
-            label = rev.success_label or "?"
-            by_label[label] = by_label.get(label, 0) + 1
-            if rev.saved_as_training:
+            label = (rev.success_label if rev else None) or "未検証"
+            by_type_label.setdefault(pt, {})
+            by_type_label[pt][label] = by_type_label[pt].get(label, 0) + 1
+            if rev and rev.saved_as_training:
                 saved_training += 1
 
         return {
-            "total_surge_20_predictions": len(logs),
-            "by_result_label": by_label,
+            "total_predictions": len(logs),
+            "by_prediction_type": by_type_total,
+            "by_type_and_label": by_type_label,
             "saved_as_training": saved_training,
+            # 後方互換 (本命のみ)
+            "total_surge_20_predictions": by_type_total.get("surge_20_prediction", 0),
+            "by_result_label": by_type_label.get("surge_20_prediction", {}),
         }
     finally:
         db.close()
