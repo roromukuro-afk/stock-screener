@@ -231,6 +231,9 @@ def run_surge_20_auto_orchestrator(req: TriggerRequest,
                                     x_cron_secret: Optional[str] = Header(None),
                                     authorization: Optional[str] = Header(None)):
     _check_secret(x_cron_secret, authorization)
+    from app.services import surge_20 as s20
+    if s20.is_heavy_running():
+        return {"status": "busy", "running_task": s20.heavy_status().get("task")}
     _run_async(automation.run_surge_20_auto_orchestrator,
                req.market or "JP", req.trigger_type or "cron", "all")
     return {"status": "started", "job_type": "surge-20-auto-orchestrator"}

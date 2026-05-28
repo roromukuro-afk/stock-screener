@@ -456,11 +456,21 @@ class OrchestratorRequest(BaseModel):
 
 @router.post("/run-auto-orchestrator")
 def run_auto_orchestrator(req: OrchestratorRequest):
-    """surge-20 全フローを非同期実行 (CRON_SECRET不要なopen版)"""
+    """surge-20 全フローを非同期実行 (CRON_SECRET不要なopen版)。busyなら409相当"""
+    if surge_20.is_heavy_running():
+        hs = surge_20.heavy_status()
+        return {"status": "busy", "message": f"別の重い処理が実行中: {hs.get('task')}",
+                "running_task": hs.get("task"), "started_at": hs.get("started_at")}
     t = threading.Thread(target=surge_20.run_auto_orchestrator,
                           args=(req.market, req.phase), daemon=True)
     t.start()
     return {"status": "started", "message": f"orchestrator開始 market={req.market} phase={req.phase}"}
+
+
+@router.get("/heavy-status")
+def heavy_status():
+    """重い処理の実行中ステータス (軽量 polling用)"""
+    return clean_for_json(surge_20.heavy_status())
 
 
 class AutoSaveRequest(BaseModel):
@@ -482,11 +492,25 @@ class BuildSaveRequest(BaseModel):
     min_similarity: float = 0.4
 
 
+def _build_and_save_locked(market, max_symbols, min_similarity):
+    if not surge_20._acquire_heavy(f"build_candidates/{market}"):
+        return
+    try:
+        surge_20.build_and_save_candidates(market=market, max_symbols=max_symbols, min_similarity=min_similarity)
+    finally:
+        surge_20._release_heavy()
+
+
 @router.post("/build-and-save-candidates")
 def build_and_save(req: BuildSaveRequest):
-    return clean_for_json(surge_20.build_and_save_candidates(
-        market=req.market, max_symbols=req.max_symbols, min_similarity=req.min_similarity,
-    ))
+    """非同期 + lock。busyなら即status=busy"""
+    if surge_20.is_heavy_running():
+        hs = surge_20.heavy_status()
+        return {"status": "busy", "running_task": hs.get("task")}
+    t = threading.Thread(target=_build_and_save_locked,
+                         args=(req.market, min(req.max_symbols, 80), req.min_similarity), daemon=True)
+    t.start()
+    return {"status": "started", "message": f"候補生成をbackgroundで開始 (market={req.market})"}
 
 
 @router.get("/candidates-today")

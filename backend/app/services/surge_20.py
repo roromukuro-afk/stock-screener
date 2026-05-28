@@ -10,10 +10,45 @@
   4. その特徴量に類似した「今」の銘柄を 20%到達候補として生成
 """
 import math
+import threading
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, date, timedelta
 import pandas as pd
 import numpy as np
+
+# ===== 同時実行lock (Render Free単一worker保護) =====
+_HEAVY_LOCK = threading.Lock()
+_heavy_running = {"task": None, "started_at": None}
+
+
+def is_heavy_running() -> bool:
+    return _heavy_running["task"] is not None
+
+
+def _acquire_heavy(task_name: str) -> bool:
+    """重い処理の排他取得。取れたらTrue。busyならFalse"""
+    if not _HEAVY_LOCK.acquire(blocking=False):
+        return False
+    _heavy_running["task"] = task_name
+    _heavy_running["started_at"] = datetime.utcnow().isoformat()
+    return True
+
+
+def _release_heavy():
+    _heavy_running["task"] = None
+    _heavy_running["started_at"] = None
+    try:
+        _HEAVY_LOCK.release()
+    except RuntimeError:
+        pass
+
+
+def heavy_status() -> Dict:
+    return {
+        "busy": is_heavy_running(),
+        "task": _heavy_running["task"],
+        "started_at": _heavy_running["started_at"],
+    }
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -1242,65 +1277,70 @@ def auto_save_top_candidates(market: str = "JP", limit: int = 20,
 
 # ============== Auto Orchestrator ==============
 def run_auto_orchestrator(market: str = "JP", phase: str = "all") -> Dict:
-    """surge-20 全フローを連鎖実行。Render Free対策で各stepは小さく。
+    """surge-20 全フローを連鎖実行。Render Free対策で各stepは小さく + 同時実行lock。
 
     phase: "all" / "expand" / "candidates" / "review" / "data-quality"
     """
+    if not _acquire_heavy(f"orchestrator/{market}/{phase}"):
+        return {"status": "busy", "message": f"別の重い処理が実行中: {_heavy_running['task']}"}
+
     results = {}
+    try:
+        # 1. data-quality
+        if phase in ("all", "data-quality"):
+            try:
+                results["data_quality_before"] = get_data_quality()
+            except Exception as e:
+                results["data_quality_before_error"] = str(e)
 
-    # 1. data-quality
-    if phase in ("all", "data-quality"):
-        try:
-            results["data_quality_before"] = get_data_quality()
-        except Exception as e:
-            results["data_quality_before_error"] = str(e)
+        # 2. orphan cleanup (軽い)
+        if phase in ("all", "data-quality", "expand"):
+            try:
+                results["orphan_cleanup"] = cleanup_orphan_pre_features()
+            except Exception as e:
+                results["orphan_cleanup_error"] = str(e)
 
-    # 2. orphan cleanup
-    if phase in ("all", "data-quality", "expand"):
-        try:
-            results["orphan_cleanup"] = cleanup_orphan_pre_features()
-        except Exception as e:
-            results["orphan_cleanup_error"] = str(e)
+        # 3. expand training (chunk縮小: 15銘柄×1チャンク)
+        if phase in ("all", "expand"):
+            try:
+                results["expand_training"] = expand_training_chunked(
+                    market=market, chunk_size=15, max_chunks_per_run=1,
+                    priority_mode="all_eligible",
+                )
+            except Exception as e:
+                results["expand_training_error"] = str(e)
 
-    # 3. expand training (chunk cursor付き)
-    if phase in ("all", "expand"):
-        try:
-            results["expand_training"] = expand_training_chunked(
-                market=market, chunk_size=30, max_chunks_per_run=1,
-                priority_mode="all_eligible",
-            )
-        except Exception as e:
-            results["expand_training_error"] = str(e)
+        # 4. candidates + auto-save (max_symbols縮小: 50)
+        if phase in ("all", "candidates"):
+            try:
+                results["candidate_build"] = build_and_save_candidates(
+                    market=market, max_symbols=50, min_similarity=0.4,
+                )
+                results["auto_save"] = auto_save_top_candidates(
+                    market=market, limit=20, min_score=70.0,
+                )
+            except Exception as e:
+                results["candidate_error"] = str(e)
 
-    # 4. candidates + auto-save
-    if phase in ("all", "candidates"):
-        try:
-            results["candidate_build"] = build_and_save_candidates(
-                market=market, max_symbols=100, min_similarity=0.4,
-            )
-            results["auto_save"] = auto_save_top_candidates(
-                market=market, limit=20, min_score=70.0,
-            )
-        except Exception as e:
-            results["candidate_error"] = str(e)
+        # 5. review + training save (軽い: DBのみ)
+        if phase in ("all", "review"):
+            try:
+                results["review"] = review_surge_20_predictions(limit=200)
+                results["training_save"] = save_surge_20_reviews_as_training()
+            except Exception as e:
+                results["review_error"] = str(e)
 
-    # 5. review + training save
-    if phase in ("all", "review"):
-        try:
-            results["review"] = review_surge_20_predictions(limit=200)
-            results["training_save"] = save_surge_20_reviews_as_training()
-        except Exception as e:
-            results["review_error"] = str(e)
+        # 6. data-quality after
+        if phase in ("all", "data-quality"):
+            try:
+                results["data_quality_after"] = get_data_quality()
+            except Exception:
+                pass
 
-    # 6. data-quality after
-    if phase in ("all", "data-quality"):
-        try:
-            results["data_quality_after"] = get_data_quality()
-        except Exception as e:
-            pass
-
-    _state_set_timestamp("surge20_last_orchestrator_at")
-    return {"status": "ok", "market": market, "phase": phase, "results": results}
+        _state_set_timestamp("surge20_last_orchestrator_at")
+        return {"status": "ok", "market": market, "phase": phase, "results": results}
+    finally:
+        _release_heavy()
 
 
 # ============== サマリ追加用 helper ==============
