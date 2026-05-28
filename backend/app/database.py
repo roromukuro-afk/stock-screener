@@ -53,9 +53,55 @@ def get_db():
 
 
 def init_db():
-    """全テーブル作成"""
+    """全テーブル作成 + 既存テーブルへの新カラム idempotent migration"""
     from app.models import models  # noqa
     Base.metadata.create_all(bind=engine)
+    migrate_add_columns_if_missing()
+
+
+def migrate_add_columns_if_missing():
+    """既存DBに後付けカラムを追加 (idempotent / SQLite + PostgreSQL 両対応)"""
+    from sqlalchemy import inspect, text
+
+    # (table, column, sql_type, default) のリスト
+    migrations = [
+        ("prediction_logs", "prediction_type", "VARCHAR(64)", "'tomorrow_prediction'"),
+        ("prediction_logs", "prediction_horizon", "VARCHAR(32)", "'next_day'"),
+        ("prediction_logs", "target_return", "FLOAT", "20.0"),
+        ("prediction_logs", "auto_trade_candidate", "BOOLEAN", "TRUE"),
+        ("prediction_logs", "watch_only", "BOOLEAN", "FALSE"),
+    ]
+
+    try:
+        inspector = inspect(engine)
+        table_names = set(inspector.get_table_names())
+    except Exception as e:
+        print(f"[migration] inspector failed: {e}")
+        return
+
+    for table, col, sql_type, default in migrations:
+        if table not in table_names:
+            continue
+        try:
+            existing = {c["name"] for c in inspector.get_columns(table)}
+        except Exception:
+            continue
+        if col in existing:
+            continue
+        # add column
+        try:
+            with engine.connect() as conn:
+                # SQLiteは BOOLEAN DEFAULT TRUE/FALSE を受けるが念のため数値で
+                if is_sqlite and "BOOLEAN" in sql_type:
+                    default_sql = "1" if default.upper() == "TRUE" else "0"
+                else:
+                    default_sql = default
+                sql = f"ALTER TABLE {table} ADD COLUMN {col} {sql_type} DEFAULT {default_sql}"
+                conn.execute(text(sql))
+                conn.commit()
+                print(f"[migration] {table} ADD COLUMN {col} {sql_type} DEFAULT {default_sql}")
+        except Exception as e:
+            print(f"[migration] {table}.{col} failed: {e}")
 
 
 def get_db_info() -> dict:
