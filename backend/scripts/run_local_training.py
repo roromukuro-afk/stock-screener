@@ -29,8 +29,38 @@ import json
 # backend ルートを import パスに追加
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# ローカルCLIモードを宣言 (database.py が軽量pool+SSL keepalivesを使う)
+os.environ.setdefault("LOCAL_TRAINING_CLI", "true")
+
 from dotenv import load_dotenv
 load_dotenv()
+
+from app.db_url import normalize_database_url, safe_database_url_info
+
+
+def _db_ping(debug: bool = False) -> bool:
+    """軽量DB ping (SELECT 1)。成功でTrue。失敗時は短いエラー。"""
+    from sqlalchemy import text
+    from app.database import engine
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        print("[DB] ping=ok")
+        return True
+    except Exception as e:
+        msg = str(e).strip().splitlines()[0] if str(e).strip() else str(e)
+        print(f"[DB ERROR] Could not connect to database.\n  reason: {msg}")
+        print("  hint: Render DBがresume済みか / External URLか / sslmode=require / resume後1-2分待って再試行")
+        if debug:
+            import traceback; traceback.print_exc()
+        return False
+
+
+def _print_db_info():
+    raw = os.getenv("DATABASE_URL", "")
+    info = safe_database_url_info(normalize_database_url(raw)) if raw else {"scheme": "sqlite(default)"}
+    print(f"[DB] scheme={info.get('scheme')} host={info.get('host')} "
+          f"port={info.get('port')} sslmode={info.get('sslmode')}")
 
 
 def _print(label, obj):
@@ -109,37 +139,118 @@ def cmd_full(args):
     _print("data_quality", get_data_quality())
 
 
+# ===== API mode (DB直結が不安定な場合のフォールバック) =====
+def _api_call(method: str, path: str, body: dict = None, debug: bool = False):
+    import requests
+    backend = os.getenv("BACKEND_URL", "https://stock-screener-backend-2h6a.onrender.com")
+    secret = os.getenv("CRON_SECRET", "")
+    headers = {"Content-Type": "application/json"}
+    if secret and path.startswith("/api/automation"):
+        headers["X-Cron-Secret"] = secret
+    try:
+        if method == "GET":
+            r = requests.get(f"{backend}{path}", headers=headers, timeout=120)
+        else:
+            r = requests.post(f"{backend}{path}", headers=headers, json=body or {}, timeout=120)
+        print(f"[API {method} {path}] HTTP {r.status_code}")
+        try:
+            return r.json()
+        except Exception:
+            return {"raw": r.text[:300]}
+    except Exception as e:
+        msg = str(e).strip().splitlines()[0] if str(e).strip() else str(e)
+        print(f"[API ERROR] {msg}")
+        return {"error": msg}
+
+
+def cmd_api_status(args):
+    _print("light-status", _api_call("GET", "/api/surge-20/light-status"))
+
+
+def cmd_api_candidates(args):
+    _print("candidate-build", _api_call("POST", "/api/automation/run-surge-20-candidate-build",
+                                        {"market": args.market, "max_symbols": args.max_symbols}))
+
+
+def cmd_api_auto_save(args):
+    _print("auto-save", _api_call("POST", "/api/automation/auto-save-surge-20-predictions",
+                                  {"market": args.market}))
+
+
+def cmd_api_review(args):
+    _print("review", _api_call("POST", "/api/automation/review-surge-20-predictions", {}))
+
+
+def cmd_api_save_training(args):
+    _print("save-training", _api_call("POST", "/api/automation/save-surge-20-reviews-as-training", {}))
+
+
+_API_DISPATCH = {
+    "status": cmd_api_status, "candidates": cmd_api_candidates,
+    "auto-save": cmd_api_auto_save, "review": cmd_api_review,
+    "save-training": cmd_api_save_training,
+}
+
+
 def main():
-    p = argparse.ArgumentParser(description="ローカル surge-20 教師データ構築 (本番DB直結)")
+    # 共通オプションを全subcommandに付ける parent parser
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--no-init", action="store_true", help="init_db()/create_allをスキップ")
+    common.add_argument("--debug", action="store_true", help="失敗時にtracebackを表示")
+    common.add_argument("--mode", choices=["db", "api", "auto"], default="db",
+                        help="db=DB直結 / api=Render API経由 / auto=db失敗時にapi")
+
+    p = argparse.ArgumentParser(
+        description="ローカル surge-20 教師データ構築 (本番DB直結 / APIフォールバック)",
+        parents=[common],
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
-    def add_common(sp):
+    def add_full(sp):
         sp.add_argument("--market", default="JP", choices=["JP", "US"])
         sp.add_argument("--max-symbols", type=int, default=50, dest="max_symbols")
         sp.add_argument("--chunk", type=int, default=15)
         sp.add_argument("--max-chunks", type=int, default=1, dest="max_chunks")
         sp.add_argument("--priority", default="known_surge_first")
 
-    sp = sub.add_parser("status"); sp.set_defaults(func=cmd_status)
-    sp = sub.add_parser("expand"); add_common(sp); sp.set_defaults(func=cmd_expand)
-    sp = sub.add_parser("candidates"); add_common(sp); sp.set_defaults(func=cmd_candidates)
-    sp = sub.add_parser("auto-save"); sp.add_argument("--market", default="JP"); sp.add_argument("--limit", type=int, default=20); sp.add_argument("--min-score", type=float, default=70.0, dest="min_score"); sp.set_defaults(func=cmd_auto_save)
-    sp = sub.add_parser("review"); sp.add_argument("--limit", type=int, default=100); sp.set_defaults(func=cmd_review)
-    sp = sub.add_parser("save-training"); sp.set_defaults(func=cmd_save_training)
-    sp = sub.add_parser("cleanup"); sp.add_argument("--consolidate", action="store_true"); sp.set_defaults(func=cmd_cleanup)
-    sp = sub.add_parser("full"); add_common(sp); sp.set_defaults(func=cmd_full)
+    sp = sub.add_parser("status", parents=[common]); sp.set_defaults(func=cmd_status)
+    sp = sub.add_parser("expand", parents=[common]); add_full(sp); sp.set_defaults(func=cmd_expand)
+    sp = sub.add_parser("candidates", parents=[common]); add_full(sp); sp.set_defaults(func=cmd_candidates)
+    sp = sub.add_parser("auto-save", parents=[common]); sp.add_argument("--market", default="JP"); sp.add_argument("--max-symbols", type=int, default=50, dest="max_symbols"); sp.add_argument("--limit", type=int, default=20); sp.add_argument("--min-score", type=float, default=70.0, dest="min_score"); sp.set_defaults(func=cmd_auto_save)
+    sp = sub.add_parser("review", parents=[common]); sp.add_argument("--limit", type=int, default=100); sp.set_defaults(func=cmd_review)
+    sp = sub.add_parser("save-training", parents=[common]); sp.set_defaults(func=cmd_save_training)
+    sp = sub.add_parser("cleanup", parents=[common]); sp.add_argument("--consolidate", action="store_true"); sp.set_defaults(func=cmd_cleanup)
+    sp = sub.add_parser("full", parents=[common]); add_full(sp); sp.set_defaults(func=cmd_full)
 
     args = p.parse_args()
-    # DB情報を最初に表示
-    from app.database import get_db_info
-    info = get_db_info()
-    print(f"[DB] scheme={info.get('url_scheme')} postgresql={info.get('is_postgresql')}")
-    # テーブル作成 (本番DBに無ければ作る)
-    try:
-        from app.database import init_db
-        init_db()
-    except Exception as e:
-        print(f"[init_db warn] {e}")
+    _print_db_info()
+
+    # ---- API mode ----
+    if args.mode == "api":
+        fn = _API_DISPATCH.get(args.command)
+        if not fn:
+            print(f"[API mode] '{args.command}' はAPIモード未対応。status/candidates/auto-save/review/save-training のみ。")
+            sys.exit(2)
+        fn(args)
+        return
+
+    # ---- DB mode (default) ----
+    if not _db_ping(debug=args.debug):
+        if args.mode == "auto":
+            print("[mode=auto] DB接続失敗 → APIモードにフォールバック")
+            fn = _API_DISPATCH.get(args.command)
+            if fn:
+                fn(args)
+                return
+        sys.exit(1)
+
+    if not args.no_init:
+        try:
+            from app.database import init_db
+            init_db()
+        except Exception as e:
+            print(f"[init_db warn] {str(e).strip().splitlines()[0] if str(e).strip() else e}")
+
     args.func(args)
 
 

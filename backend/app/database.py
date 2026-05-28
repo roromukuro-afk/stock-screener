@@ -7,13 +7,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./screener.db")
+from app.db_url import normalize_database_url
 
-# Render等が postgres:// を提供する場合 SQLAlchemy 2.x は postgresql:// が必要
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+DATABASE_URL = normalize_database_url(os.getenv("DATABASE_URL", "sqlite:///./screener.db"))
 
 is_sqlite = DATABASE_URL.startswith("sqlite")
+# ローカルCLI判定: 軽量pool + SSL keepalives で External 接続を安定させる
+_is_local_cli = os.getenv("LOCAL_TRAINING_CLI", "false").lower() == "true"
 
 if is_sqlite:
     engine = create_engine(
@@ -29,16 +29,39 @@ if is_sqlite:
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 else:
-    # PostgreSQL: Render Freeの並列処理(thread多用)を吸収できるpool
-    engine = create_engine(
-        DATABASE_URL,
-        pool_pre_ping=True,
-        pool_recycle=300,
-        pool_size=10,
-        max_overflow=20,
-        pool_timeout=60,
-        echo=False,
-    )
+    # PostgreSQL SSL安定 connect_args (Render External でのSSL切断対策)
+    _pg_connect_args = {
+        "sslmode": "require",
+        "connect_timeout": 10,
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+    }
+    if _is_local_cli:
+        # ローカルCLI: 単一接続・短命・pre_pingで安定優先
+        engine = create_engine(
+            DATABASE_URL,
+            pool_pre_ping=True,
+            pool_recycle=60,
+            pool_size=1,
+            max_overflow=0,
+            pool_timeout=10,
+            connect_args=_pg_connect_args,
+            echo=False,
+        )
+    else:
+        # Render本番API: 並列吸収できるpool
+        engine = create_engine(
+            DATABASE_URL,
+            pool_pre_ping=True,
+            pool_recycle=300,
+            pool_size=10,
+            max_overflow=20,
+            pool_timeout=60,
+            connect_args=_pg_connect_args,
+            echo=False,
+        )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
