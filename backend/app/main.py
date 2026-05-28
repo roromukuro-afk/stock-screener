@@ -13,13 +13,18 @@ from app.routers import dashboard, screening, stocks, exclusions, export, backte
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    # init_db / seed は失敗してもアプリ起動を止めない (Renderデプロイ失敗防止)
+    try:
+        init_db()
+        print("[startup] init_db ok")
+    except Exception as e:
+        print(f"[startup] init_db failed (continuing): {e}")
     try:
         from app.services.pattern_seed import seed_patterns
         n = seed_patterns()
         print(f"[startup] pattern_library seeded: {n} patterns")
     except Exception as e:
-        print(f"[startup] pattern seed failed: {e}")
+        print(f"[startup] pattern seed failed (continuing): {e}")
     yield
 
 
