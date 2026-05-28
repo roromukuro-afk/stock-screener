@@ -37,13 +37,18 @@ next-env.d.ts
 
 # ===== Environment / Secrets =====
 .env
+.env.*
 .env.local
 .env.*.local
 .env.production
 .env.development
 backend/.env
+backend/.env.*
 frontend/.env.local
 frontend/.env.production
+# 例ファイルだけは追跡可 (秘密を含まないテンプレート)
+!.env.example
+!backend/.env.example
 
 # ===== Database =====
 *.db

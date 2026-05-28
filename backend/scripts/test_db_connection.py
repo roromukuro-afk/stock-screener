@@ -16,10 +16,16 @@ import argparse
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from dotenv import load_dotenv
-load_dotenv()
 
-from app.db_url import normalize_database_url, safe_database_url_info, psycopg2_connect_kwargs
+from app.db_url import (
+    normalize_database_url, safe_database_url_info, psycopg2_connect_kwargs,
+    load_database_url_with_source,
+)
+
+_SETUP_HINT = (
+    "[HINT] 本番PostgreSQLに接続するには:  python scripts/setup_local_training.py"
+    "  (または PowerShell: .\\scripts\\setup_local_training.ps1)"
+)
 
 
 def _print_info(url: str):
@@ -96,16 +102,22 @@ def main():
     p.add_argument("--driver", choices=["psycopg2", "sqlalchemy", "both"], default="both")
     p.add_argument("--debug", action="store_true")
     p.add_argument("--retries", type=int, default=2)
+    p.add_argument("--require-postgres", action="store_true", dest="require_postgres",
+                   help="SQLiteフォールバック時はエラー終了 (本番DB接続を強制)")
     args = p.parse_args()
 
-    raw = os.getenv("DATABASE_URL", "")
-    if not raw:
-        print("[DB ERROR] DATABASE_URL not set in environment / .env")
-        sys.exit(2)
-    url = normalize_database_url(raw)
+    url, source = load_database_url_with_source()
+    print(f"[ENV] source={source}")
     info = _print_info(url)
 
     if not info.get("is_postgresql"):
+        if args.require_postgres:
+            print("[DB ERROR] DATABASE_URL が PostgreSQL ではありません (SQLiteフォールバック)。")
+            print("  --require-postgres 指定時は本番DB接続が必須です。")
+            print(_SETUP_HINT)
+            sys.exit(1)
+        print("[WARN] DATABASE_URL が見つからないため SQLite を使用しています。")
+        print("       本番DBに接続するには scripts/setup_local_training.py を実行してください。")
         print("[DB] PostgreSQLではありません (sqlite等)。External接続テストはスキップ。")
         ok = test_sqlalchemy(url, args.debug)
         sys.exit(0 if ok else 1)

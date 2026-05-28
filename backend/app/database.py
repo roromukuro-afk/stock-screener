@@ -3,13 +3,14 @@ import os
 from sqlalchemy import create_engine, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from dotenv import load_dotenv
 
-load_dotenv()
+from app.db_url import normalize_database_url, load_database_url_with_source
 
-from app.db_url import normalize_database_url
-
-DATABASE_URL = normalize_database_url(os.getenv("DATABASE_URL", "sqlite:///./screener.db"))
+# DATABASE_URL 解決は優先順位ローダーに一本化する (load_dotenv は使わない)。
+# 優先順位: env > LOCAL_TRAINING_ENV_FILE > .env.local-training > .env > sqlite
+# ローカルCLIは bootstrap_local_training_env() で import 前に os.environ を確定する。
+# 本番(Render)は実際の環境変数 DATABASE_URL が #1 で解決される。
+DATABASE_URL, _DB_URL_SOURCE = load_database_url_with_source()
 
 is_sqlite = DATABASE_URL.startswith("sqlite")
 # ローカルCLI判定: 軽量pool + SSL keepalives で External 接続を安定させる
@@ -132,4 +133,5 @@ def get_db_info() -> dict:
         "url_scheme": DATABASE_URL.split(":", 1)[0],
         "is_sqlite": is_sqlite,
         "is_postgresql": DATABASE_URL.startswith("postgresql"),
+        "source": _DB_URL_SOURCE,
     }

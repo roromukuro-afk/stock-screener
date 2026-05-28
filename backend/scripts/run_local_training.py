@@ -32,10 +32,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ローカルCLIモードを宣言 (database.py が軽量pool+SSL keepalivesを使う)
 os.environ.setdefault("LOCAL_TRAINING_CLI", "true")
 
-from dotenv import load_dotenv
-load_dotenv()
+# 注意: load_dotenv() は使わない。
+# DATABASE_URL は優先順位で解決する
+# (env > LOCAL_TRAINING_ENV_FILE > .env.local-training > .env > sqlite)。
+from app.db_url import safe_database_url_info, bootstrap_local_training_env
 
-from app.db_url import normalize_database_url, safe_database_url_info
+# app.database を import する前に os.environ['DATABASE_URL'] を確定し、
+# 解決元ファイルの CRON_SECRET / BACKEND_URL も読み込む (秘密はprintしない)。
+_BOOT_URL, _BOOT_SOURCE = bootstrap_local_training_env()
+
+_SETUP_HINT = (
+    "[HINT] 本番PostgreSQLに接続するには:  python scripts/setup_local_training.py"
+    "  (または PowerShell: .\\scripts\\setup_local_training.ps1)"
+)
 
 
 def _db_ping(debug: bool = False) -> bool:
@@ -57,10 +66,11 @@ def _db_ping(debug: bool = False) -> bool:
 
 
 def _print_db_info():
-    raw = os.getenv("DATABASE_URL", "")
-    info = safe_database_url_info(normalize_database_url(raw)) if raw else {"scheme": "sqlite(default)"}
+    info = safe_database_url_info(_BOOT_URL)
+    print(f"[ENV] source={_BOOT_SOURCE}")
     print(f"[DB] scheme={info.get('scheme')} host={info.get('host')} "
           f"port={info.get('port')} sslmode={info.get('sslmode')}")
+    return info
 
 
 def _print(label, obj):
@@ -199,6 +209,8 @@ def main():
     common.add_argument("--debug", action="store_true", help="失敗時にtracebackを表示")
     common.add_argument("--mode", choices=["db", "api", "auto"], default="db",
                         help="db=DB直結 / api=Render API経由 / auto=db失敗時にapi")
+    common.add_argument("--require-postgres", action="store_true", dest="require_postgres",
+                        help="SQLiteフォールバック時は処理を拒否 (本番DB接続を強制)")
 
     p = argparse.ArgumentParser(
         description="ローカル surge-20 教師データ構築 (本番DB直結 / APIフォールバック)",
@@ -223,7 +235,15 @@ def main():
     sp = sub.add_parser("full", parents=[common]); add_full(sp); sp.set_defaults(func=cmd_full)
 
     args = p.parse_args()
-    _print_db_info()
+    info = _print_db_info()
+
+    # ---- require-postgres ガード (API modeは対象外) ----
+    if getattr(args, "require_postgres", False) and args.mode != "api":
+        if not info.get("is_postgresql"):
+            print("[DB ERROR] DATABASE_URL が PostgreSQL ではありません (SQLiteフォールバック)。")
+            print("  --require-postgres 指定時は本番DB接続が必須です。処理を中止します。")
+            print(_SETUP_HINT)
+            sys.exit(1)
 
     # ---- API mode ----
     if args.mode == "api":
