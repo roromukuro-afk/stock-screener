@@ -24,6 +24,7 @@ on:
         options:
           - status
           - test-cron-secret
+          - ensure-schema
           - run-daily-jp
           - run-daily-us
           - research-materials-daily
@@ -93,6 +94,24 @@ jobs:
             echo "::error::CRON_SECRET test failed (HTTP $code). Check Render Env CRON_SECRET matches GitHub Secret."
             exit 1
           fi
+
+      - name: Ensure DB schema (schedule, safe/idempotent)
+        if: github.event_name == 'schedule'
+        run: |
+          # 不足テーブル/カラムを非破壊で補完 (ADD COLUMN IF NOT EXISTS / CREATE TABLE)。
+          # DB未接続でも degraded を返すだけなので pipeline は止めない (非致命)。
+          code=$(curl -sS --max-time 120 -o /tmp/es.json -w "%{http_code}" -X POST \
+            -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            "$BACKEND_URL/api/automation/ensure-schema")
+          echo "ensure-schema HTTP $code"; head -c 600 /tmp/es.json || true; echo
+          if [ "$code" -ge 500 ] 2>/dev/null; then echo "::warning::ensure-schema HTTP $code (continuing)"; fi
+
+      - name: Manual - ensure-schema
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'ensure-schema'
+        run: |
+          curl -sS --max-time 120 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/ensure-schema"
 
       # ===== Schedule-based dispatch =====
       - name: JST 16:40 - JP daily + materials
@@ -469,3 +488,6 @@ jobs:
           echo
           echo "--- recent jobs ---"
           curl -sS --max-time 30 "$BACKEND_URL/api/automation/jobs?limit=3" -w "\nHTTP %{http_code}\n" | head -c 800
+          echo
+          echo "--- recent errors ---"
+          curl -sS --max-time 30 "$BACKEND_URL/api/automation/errors?limit=3" -w "\nHTTP %{http_code}\n" | head -c 800

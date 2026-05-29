@@ -182,14 +182,17 @@ export default function AutomationPage() {
   const [jobs, setJobs] = useState<any[]>([]);
   const [errors, setErrors] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [health, setHealth] = useState<any>(null);
 
   const load = useCallback(async () => {
     try {
-      const [s, j, e] = await Promise.all([
+      const [h, s, j, e] = await Promise.all([
+        fetchAPI("/api/health").catch(() => null),
         fetchAPI("/api/automation/status"),
         fetchAPI("/api/automation/jobs?limit=30"),
         fetchAPI("/api/automation/errors?limit=20"),
       ]);
+      setHealth(h);
       setStatus(s); setJobs(j.items || []); setErrors(e.items || []);
       setError(null);
     } catch (err: any) { setError(err.message); }
@@ -213,6 +216,17 @@ export default function AutomationPage() {
     </div>
   );
 
+  // DB接続状態 (degraded / health=disconnected を検出)。0件と区別する。
+  const statusDegraded = (status as any)?.status === "degraded" || !!(status as any)?.error;
+  const dbDisconnected = (health && health.database === "disconnected") || statusDegraded;
+  const dbErrShort = (health && health.database_error_short) || (status as any)?.error || null;
+  // degraded時に today / balance が無くてもクラッシュしないようfallback
+  const today = (status as any).today || {
+    jobs_today: 0, surge_detected_today: 0, aar_cases_today: 0, positive_cases_today: 0,
+    negative_cases_today: 0, predictions_saved_today: 0, outcomes_updated_today: 0, training_cases_today: 0,
+  };
+  const bal = (status as any).training_data_balance || { total: 0, positive: 0, negative: 0, ratio: 0 };
+
   return (
     <div className="space-y-5">
       <div className="card p-5" style={{ background: "linear-gradient(135deg, #0c4a6e 0%, #075985 100%)" }}>
@@ -221,6 +235,28 @@ export default function AutomationPage() {
         <div className="mt-3 p-2 bg-yellow-900/40 rounded text-yellow-200 text-xs">
           ⚠️ これは投資助言ではありません。分析・学習・検証目的の自動化です。
         </div>
+      </div>
+
+      {/* DB接続状態バナー (0件ではなく接続エラーを明示) */}
+      <div className={`card p-4 ${dbDisconnected ? "bg-red-50 border-red-300" : "bg-green-50 border-green-200"}`}>
+        <div className="flex items-center justify-between">
+          <h2 className={`font-bold ${dbDisconnected ? "text-red-700" : "text-green-700"}`}>
+            {dbDisconnected ? "🛑 本番DB接続エラー" : "✅ 本番DB接続OK"}
+          </h2>
+          <span className="text-xs text-gray-500">
+            {health ? `database=${health.database ?? "?"} / type=${health.database_type ?? "?"}` : "health取得中..."}
+          </span>
+        </div>
+        {dbDisconnected && (
+          <div className="mt-2 text-sm text-red-700 space-y-1">
+            <p>以下の数値は「0件」ではなく<strong>DBに接続できていないため取得不可</strong>の状態です。</p>
+            {dbErrShort && <p className="text-xs font-mono bg-red-100 rounded px-2 py-1 break-all">理由: {dbErrShort}</p>}
+            <p className="text-xs text-red-600">
+              対処: Render Dashboard → PostgreSQL の稼働状態と、Web service の DATABASE_URL を確認してください。
+              復旧後は次回起動/cronの ensure-schema で自動補完されます。
+            </p>
+          </div>
+        )}
       </div>
 
       {/* 状態 */}
@@ -271,14 +307,14 @@ export default function AutomationPage() {
       <div>
         <h2 className="font-bold text-gray-800 mb-3">📊 本日の自動化結果</h2>
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
-          <div className="card p-3"><p className="text-xs text-gray-500">ジョブ数</p><p className="text-2xl font-bold">{status.today.jobs_today}</p></div>
-          <div className="card p-3"><p className="text-xs text-gray-500">急騰検出</p><p className="text-2xl font-bold text-green-600">{status.today.surge_detected_today}</p></div>
-          <div className="card p-3"><p className="text-xs text-gray-500">AAR追加</p><p className="text-2xl font-bold text-purple-600">{status.today.aar_cases_today}</p></div>
-          <div className="card p-3"><p className="text-xs text-gray-500">positive追加</p><p className="text-2xl font-bold text-green-700">{status.today.positive_cases_today}</p></div>
-          <div className="card p-3"><p className="text-xs text-gray-500">negative追加</p><p className="text-2xl font-bold text-red-500">{status.today.negative_cases_today}</p></div>
-          <div className="card p-3"><p className="text-xs text-gray-500">予測保存</p><p className="text-2xl font-bold text-emerald-600">{status.today.predictions_saved_today}</p></div>
-          <div className="card p-3"><p className="text-xs text-gray-500">outcomes更新</p><p className="text-2xl font-bold text-blue-600">{status.today.outcomes_updated_today}</p></div>
-          <div className="card p-3"><p className="text-xs text-gray-500">教師化</p><p className="text-2xl font-bold text-fuchsia-600">{status.today.training_cases_today}</p></div>
+          <div className="card p-3"><p className="text-xs text-gray-500">ジョブ数</p><p className="text-2xl font-bold">{today.jobs_today}</p></div>
+          <div className="card p-3"><p className="text-xs text-gray-500">急騰検出</p><p className="text-2xl font-bold text-green-600">{today.surge_detected_today}</p></div>
+          <div className="card p-3"><p className="text-xs text-gray-500">AAR追加</p><p className="text-2xl font-bold text-purple-600">{today.aar_cases_today}</p></div>
+          <div className="card p-3"><p className="text-xs text-gray-500">positive追加</p><p className="text-2xl font-bold text-green-700">{today.positive_cases_today}</p></div>
+          <div className="card p-3"><p className="text-xs text-gray-500">negative追加</p><p className="text-2xl font-bold text-red-500">{today.negative_cases_today}</p></div>
+          <div className="card p-3"><p className="text-xs text-gray-500">予測保存</p><p className="text-2xl font-bold text-emerald-600">{today.predictions_saved_today}</p></div>
+          <div className="card p-3"><p className="text-xs text-gray-500">outcomes更新</p><p className="text-2xl font-bold text-blue-600">{today.outcomes_updated_today}</p></div>
+          <div className="card p-3"><p className="text-xs text-gray-500">教師化</p><p className="text-2xl font-bold text-fuchsia-600">{today.training_cases_today}</p></div>
         </div>
       </div>
 
@@ -286,10 +322,10 @@ export default function AutomationPage() {
       <div className="card p-4">
         <h2 className="font-bold text-gray-800 mb-3">⚖️ 教師データバランス (training_feature_vectors)</h2>
         <div className="grid grid-cols-4 gap-3 text-sm">
-          <div><p className="text-xs text-gray-500">total</p><p className="text-2xl font-bold">{status.training_data_balance.total}</p></div>
-          <div><p className="text-xs text-gray-500">positive</p><p className="text-2xl font-bold text-green-600">{status.training_data_balance.positive}</p></div>
-          <div><p className="text-xs text-gray-500">negative</p><p className="text-2xl font-bold text-red-500">{status.training_data_balance.negative}</p></div>
-          <div><p className="text-xs text-gray-500">N/P ratio</p><p className={`text-2xl font-bold ${status.training_data_balance.ratio >= 1 ? "text-green-600" : "text-orange-500"}`}>{status.training_data_balance.ratio}</p></div>
+          <div><p className="text-xs text-gray-500">total</p><p className="text-2xl font-bold">{bal.total}</p></div>
+          <div><p className="text-xs text-gray-500">positive</p><p className="text-2xl font-bold text-green-600">{bal.positive}</p></div>
+          <div><p className="text-xs text-gray-500">negative</p><p className="text-2xl font-bold text-red-500">{bal.negative}</p></div>
+          <div><p className="text-xs text-gray-500">N/P ratio</p><p className={`text-2xl font-bold ${bal.ratio >= 1 ? "text-green-600" : "text-orange-500"}`}>{bal.ratio}</p></div>
         </div>
       </div>
 

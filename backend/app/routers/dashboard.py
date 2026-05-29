@@ -12,15 +12,39 @@ router = APIRouter(prefix="/api", tags=["dashboard"])
 
 @router.get("/health")
 def health_check():
+    """ヘルスチェック。実際に SELECT 1 を実行してDB接続を確認する。
+
+    Render の health check を壊さないため HTTP は常に 200。
+    DB失敗時は status=degraded / database=disconnected を返す (秘密情報は出さない)。
+    """
     db_info = get_db_info()
-    return {
-        "status": "ok",
+    db_ok = False
+    err_type = None
+    err_short = None
+    try:
+        from sqlalchemy import text
+        from app.database import engine
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception as e:
+        err_type = type(e).__name__
+        s = str(e).strip().splitlines()
+        # 秘密情報を出さないため短く・先頭1行のみ
+        err_short = (s[0] if s else err_type)[:200]
+
+    resp = {
+        "status": "ok" if db_ok else "degraded",
         "environment": os.getenv("APP_ENV", "local"),
-        "database": "connected",
+        "database": "connected" if db_ok else "disconnected",
         "database_type": db_info.get("url_scheme"),
         "sample_mode": is_sample_mode(),
         "message": "短期急騰3000円以下AIスクリーナー バックエンド稼働中",
     }
+    if not db_ok:
+        resp["database_error_type"] = err_type
+        resp["database_error_short"] = err_short
+    return resp
 
 
 @router.get("/dashboard")
