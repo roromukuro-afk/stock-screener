@@ -148,15 +148,24 @@ def list_universe(eligible_only: bool = False, market: str = None, limit: int = 
         db.close()
 
 
-def list_eligible_yahoo_symbols(markets: List[str] = None, max_count: int = 0, include_adr: bool = True) -> List[Dict]:
-    """スクリーニング対象として有効な銘柄のyahoo_symbolリスト"""
+def list_eligible_yahoo_symbols(markets: List[str] = None, max_count: int = 0,
+                                include_adr: bool = True, offset: int = 0) -> List[Dict]:
+    """スクリーニング対象として有効な銘柄のyahoo_symbolリスト。
+
+    offset/max_count でページング可能 (rolling cursor 用)。
+    安定したカーソルのため symbol で常にソートする。
+    """
     db: Session = SessionLocal()
     try:
-        q = db.query(UniverseSymbol).filter(UniverseSymbol.is_screening_eligible == True)
+        q = (db.query(UniverseSymbol)
+             .filter(UniverseSymbol.is_screening_eligible == True)
+             .order_by(UniverseSymbol.symbol))
         if markets:
             q = q.filter(UniverseSymbol.market.in_(markets))
         if not include_adr:
             q = q.filter(UniverseSymbol.is_adr == False)
+        if offset and offset > 0:
+            q = q.offset(offset)
         if max_count > 0:
             q = q.limit(max_count)
         return [
@@ -170,6 +179,20 @@ def list_eligible_yahoo_symbols(markets: List[str] = None, max_count: int = 0, i
             }
             for r in q.all()
         ]
+    finally:
+        db.close()
+
+
+def count_eligible_yahoo_symbols(markets: List[str] = None, include_adr: bool = True) -> int:
+    """スクリーニング対象として有効な銘柄数 (rolling cursor の折返し判定用)"""
+    db: Session = SessionLocal()
+    try:
+        q = db.query(UniverseSymbol).filter(UniverseSymbol.is_screening_eligible == True)
+        if markets:
+            q = q.filter(UniverseSymbol.market.in_(markets))
+        if not include_adr:
+            q = q.filter(UniverseSymbol.is_adr == False)
+        return q.count()
     finally:
         db.close()
 

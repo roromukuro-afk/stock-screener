@@ -1087,13 +1087,34 @@ def expand_training_chunked(market: str = "JP", chunk_size: int = 50,
 
 # ============== 候補をDB保存 + auto-save ==============
 def build_and_save_candidates(market: str = "JP", max_symbols: int = 200,
-                               min_similarity: float = 0.4) -> Dict:
-    """候補を生成して surge_20_candidates に保存"""
+                               min_similarity: float = 0.4, start_offset: Optional[int] = None) -> Dict:
+    """候補を生成して surge_20_candidates に保存。
+
+    start_offset=None の場合は automation_state のカーソルから開始し、
+    実行後にカーソルを max_symbols 分進める (universe全体を日次で巡回)。
+    """
     from app.models.models import Surge20Candidate
 
-    r = build_candidates(market=market, max_symbols=max_symbols, min_similarity=min_similarity)
+    offset_key = f"surge20_{market.lower()}_candidate_offset"
+    use_cursor = start_offset is None
+    if use_cursor:
+        try:
+            start_offset = int(_state_get(offset_key, "0"))
+        except Exception:
+            start_offset = 0
+
+    r = build_candidates(market=market, max_symbols=max_symbols,
+                         min_similarity=min_similarity, start_offset=start_offset or 0)
     if r.get("status") != "ok":
         return r
+
+    # rolling cursor を進める (一巡したら0に戻す)
+    total_eligible = r.get("total_eligible", 0)
+    next_offset = (start_offset or 0) + max_symbols
+    if not total_eligible or next_offset >= total_eligible:
+        next_offset = 0
+    if use_cursor:
+        _state_set(offset_key, str(next_offset))
 
     today = date.today().isoformat()
     saved = 0
@@ -1160,6 +1181,11 @@ def build_and_save_candidates(market: str = "JP", max_symbols: int = 200,
         "saved": saved,
         "updated": updated,
         "by_label": r.get("by_label"),
+        "universe_scanned": r.get("universe_scanned"),
+        "start_offset": start_offset,
+        "next_offset": next_offset,
+        "total_eligible": total_eligible,
+        "cycle_completed": next_offset == 0,
     }
 
 
@@ -1923,10 +1949,11 @@ def _classify_candidate(positive_sim: float, negative_sim: float, current: Dict)
 
 
 def build_candidates(market: str = "JP", max_symbols: int = 200,
-                     min_similarity: float = 0.4) -> Dict:
+                     min_similarity: float = 0.4, start_offset: int = 0) -> Dict:
     """過去 surge_20 イベント に紐づく valid pre_features と類似度マッチで候補生成。
     削除済み event の orphan features は除外。T0 は学習特徴量に含めない。
     negative_similarity も同時計算し、候補分類する。
+    start_offset: universe走査の開始位置 (rolling cursor 用)。
     """
     from app.services.predictor import _numeric_distance, compute_current_features
 
@@ -1972,8 +1999,9 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
         return {"status": "no_library", "message": "valid pre_features がありません",
                 "orphan_pre_features": orphan_count}
 
+    total_eligible = universe_db.count_eligible_yahoo_symbols(markets=[market], include_adr=True)
     syms = universe_db.list_eligible_yahoo_symbols(
-        markets=[market], max_count=max_symbols, include_adr=True,
+        markets=[market], max_count=max_symbols, include_adr=True, offset=start_offset,
     )
 
     candidates = []
@@ -2043,6 +2071,8 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
         "status": "ok",
         "market": market,
         "universe_scanned": len(syms),
+        "start_offset": start_offset,
+        "total_eligible": total_eligible,
         "valid_pre_features_used": len(positive_library),
         "orphan_pre_features_excluded": orphan_count,
         "candidates_count": len(candidates),

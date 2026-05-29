@@ -574,10 +574,18 @@ def run_surge_20_expand_training(market: str = "JP", trigger_type: str = "cron",
 
 
 def run_surge_20_candidate_build(market: str = "JP", trigger_type: str = "cron", max_symbols: int = 200) -> Dict:
+    """候補生成して surge_20_candidates に保存する (rolling cursorでuniverse巡回)。
+
+    旧実装は build_candidates (計算のみ・未保存) を呼んでいたため auto-save が
+    候補を拾えず予測が出なかった。build_and_save_candidates で必ず永続化する。
+    """
     from app.services import surge_20
     job_id = _create_job("surge-20-candidate-build", market, trigger_type)
     try:
-        r = surge_20.build_candidates(market=market, max_symbols=max_symbols)
+        r = surge_20.build_and_save_candidates(market=market, max_symbols=max_symbols)
+        if r.get("status") != "ok":
+            _finish_job(job_id, "completed", total_symbols=0)
+            return {"status": r.get("status", "ok"), "job_id": job_id, **r}
         _finish_job(job_id, "completed",
                     total_symbols=r.get("universe_scanned", 0),
                     detected_surge_count=r.get("candidates_count", 0))
