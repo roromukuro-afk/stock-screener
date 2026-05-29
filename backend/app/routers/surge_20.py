@@ -475,8 +475,14 @@ def heavy_status():
 
 @router.get("/light-status")
 def light_status():
-    """高負荷時でも返る軽量status (最小限のCOUNT)"""
-    return clean_for_json(surge_20.get_light_status())
+    """高負荷時でも返る軽量status (最小限のCOUNT)。例外でも500にしない。"""
+    try:
+        return clean_for_json(surge_20.get_light_status())
+    except Exception as e:
+        msg = str(e).strip().splitlines()
+        return {"status": "degraded", "render_safe_to_run": False,
+                "warnings": [(msg[0] if msg else type(e).__name__)[:300]],
+                "hint": "POST /api/automation/ensure-schema を実行してください"}
 
 
 class AutoSaveRequest(BaseModel):

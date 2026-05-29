@@ -80,7 +80,102 @@ def init_db():
     """全テーブル作成 + 既存テーブルへの新カラム idempotent migration"""
     from app.models import models  # noqa
     Base.metadata.create_all(bind=engine)
+    # 包括的 ensure_schema (モデル定義との差分を非破壊で吸収)
+    try:
+        ensure_schema()
+    except Exception as e:
+        print(f"[init_db] ensure_schema failed (continuing): {e}")
+    # 旧 migration (後方互換 / 念のため)
     migrate_add_columns_if_missing()
+
+
+def _short_err(e: Exception) -> str:
+    s = str(e).strip().splitlines()
+    return (s[0] if s else str(e))[:200]
+
+
+def _column_default_clause(col, is_pg: bool) -> str:
+    """col.default が単純スカラーなら DEFAULT 句を返す (既存行をNULLにしないため)。"""
+    d = getattr(col, "default", None)
+    if d is None or not getattr(d, "is_scalar", False):
+        return ""
+    val = d.arg
+    # bool は int のサブクラスなので先に判定
+    if isinstance(val, bool):
+        if is_pg:
+            return f" DEFAULT {'TRUE' if val else 'FALSE'}"
+        return f" DEFAULT {1 if val else 0}"
+    if isinstance(val, (int, float)):
+        return f" DEFAULT {val}"
+    if isinstance(val, str):
+        safe = val.replace("'", "''")
+        return f" DEFAULT '{safe}'"
+    return ""
+
+
+def ensure_schema() -> dict:
+    """モデル定義に対して本番DBに不足しているテーブル/カラムを非破壊で追加する。
+
+    - CREATE TABLE は create_all が担当 (既存テーブルは変更しない)。
+    - 既存テーブルに不足しているカラムだけ ALTER TABLE ADD COLUMN する。
+    - DROP / TRUNCATE / 型変更 は一切行わない (idempotent / 非破壊)。
+    - 失敗したテーブル/カラムは errors に短く記録 (秘密情報は出さない)。
+    SQLite / PostgreSQL 両対応。
+    """
+    from app.models import models  # noqa: F401
+    from sqlalchemy import inspect, text
+
+    summary = {
+        "dialect": engine.dialect.name,
+        "created_tables": [],
+        "added_columns": [],
+        "errors": [],
+        "checked_tables": 0,
+    }
+
+    # 1. 不足テーブルを作成
+    try:
+        before = set(inspect(engine).get_table_names())
+        Base.metadata.create_all(bind=engine)
+        after = set(inspect(engine).get_table_names())
+        summary["created_tables"] = sorted(after - before)
+    except Exception as e:
+        summary["errors"].append(f"create_all: {_short_err(e)}")
+        return summary
+
+    # 2. 既存テーブルの不足カラムを追加
+    inspector = inspect(engine)
+    dialect = engine.dialect
+    is_pg = dialect.name == "postgresql"
+    for table_name, table in Base.metadata.tables.items():
+        try:
+            db_cols = {c["name"] for c in inspector.get_columns(table_name)}
+        except Exception as e:
+            summary["errors"].append(f"{table_name}: inspect: {_short_err(e)}")
+            continue
+        summary["checked_tables"] += 1
+        for col in table.columns:
+            if col.name in db_cols:
+                continue
+            try:
+                type_sql = col.type.compile(dialect=dialect)
+            except Exception:
+                type_sql = "VARCHAR"
+            default_sql = _column_default_clause(col, is_pg)
+            # 識別子はダブルクオートで保護 (予約語対策)。事前チェック済みなのでIF NOT EXISTS不要だが
+            # PostgreSQLでは競合防止に IF NOT EXISTS を付与。
+            if is_pg:
+                ddl = f'ALTER TABLE "{table_name}" ADD COLUMN IF NOT EXISTS "{col.name}" {type_sql}{default_sql}'
+            else:
+                ddl = f'ALTER TABLE "{table_name}" ADD COLUMN "{col.name}" {type_sql}{default_sql}'
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text(ddl))
+                    conn.commit()
+                summary["added_columns"].append(f"{table_name}.{col.name}")
+            except Exception as e:
+                summary["errors"].append(f"{table_name}.{col.name}: {_short_err(e)}")
+    return summary
 
 
 def migrate_add_columns_if_missing():

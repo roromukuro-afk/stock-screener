@@ -89,6 +89,12 @@ def cmd_status(args):
     _print("data-quality", surge_20.get_data_quality())
 
 
+def cmd_ensure_schema(args):
+    """DB直結で不足テーブル/カラムを非破壊追加。"""
+    from app.database import ensure_schema
+    _print("ensure_schema", ensure_schema())
+
+
 def cmd_expand(args):
     from app.services.surge_20 import expand_training_chunked
     r = expand_training_chunked(
@@ -174,7 +180,21 @@ def _api_call(method: str, path: str, body: dict = None, debug: bool = False):
 
 
 def cmd_api_status(args):
-    _print("light-status", _api_call("GET", "/api/surge-20/light-status"))
+    """複数の確認APIを順番に叩く。1つ失敗しても他を表示する。"""
+    endpoints = [
+        ("health", "GET", "/api/health"),
+        ("automation-status", "GET", "/api/automation/status"),
+        ("light-status", "GET", "/api/surge-20/light-status"),
+        ("automation-jobs", "GET", "/api/automation/jobs?limit=5"),
+        ("automation-errors", "GET", "/api/automation/errors?limit=5"),
+    ]
+    for label, method, path in endpoints:
+        _print(label, _api_call(method, path))
+
+
+def cmd_api_ensure_schema(args):
+    """本番DBの不足テーブル/カラムを非破壊で追加 (CRON_SECRET必須)。"""
+    _print("ensure-schema", _api_call("POST", "/api/automation/ensure-schema", {}))
 
 
 def cmd_api_candidates(args):
@@ -199,6 +219,7 @@ _API_DISPATCH = {
     "status": cmd_api_status, "candidates": cmd_api_candidates,
     "auto-save": cmd_api_auto_save, "review": cmd_api_review,
     "save-training": cmd_api_save_training,
+    "ensure-schema": cmd_api_ensure_schema,
 }
 
 
@@ -226,6 +247,7 @@ def main():
         sp.add_argument("--priority", default="known_surge_first")
 
     sp = sub.add_parser("status", parents=[common]); sp.set_defaults(func=cmd_status)
+    sp = sub.add_parser("ensure-schema", parents=[common]); sp.set_defaults(func=cmd_ensure_schema)
     sp = sub.add_parser("expand", parents=[common]); add_full(sp); sp.set_defaults(func=cmd_expand)
     sp = sub.add_parser("candidates", parents=[common]); add_full(sp); sp.set_defaults(func=cmd_candidates)
     sp = sub.add_parser("auto-save", parents=[common]); sp.add_argument("--market", default="JP"); sp.add_argument("--max-symbols", type=int, default=50, dest="max_symbols"); sp.add_argument("--limit", type=int, default=20); sp.add_argument("--min-score", type=float, default=70.0, dest="min_score"); sp.set_defaults(func=cmd_auto_save)

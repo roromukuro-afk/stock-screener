@@ -789,56 +789,106 @@ def cleanup_orphan_pre_features() -> Dict:
 
 
 def get_light_status() -> Dict:
-    """高負荷時でも返る軽量status。最小限のCOUNTのみ。"""
+    """高負荷時でも返る軽量status。最小限のCOUNTのみ。
+
+    どこかのCOUNT/テーブルが失敗しても全体を500にしない。
+    項目ごとに try/except で fallback し、warnings に記録、status=degraded で200返却。
+    """
     from app.models.models import (
         Surge20Candidate, PredictionLog, AutomationError, AutomationLock
     )
     today = date.today().isoformat()
-    db = SessionLocal()
+    warnings: List[str] = []
+    out: Dict = {
+        "status": "ok",
+        "active_locks": [],
+        "heavy_running": False,
+        "heavy_task": None,
+        "candidates_today": 0,
+        "main_saved_today": 0,
+        "watch_saved_today": 0,
+        "rejected_watch_saved_today": 0,
+        "late_chase_watch_saved_today": 0,
+        "open_surge_20_predictions": 0,
+        "errors_last_24h": 0,
+        "render_safe_to_run": False,
+        "warnings": warnings,
+    }
+
+    def _short(e: Exception) -> str:
+        s = str(e).strip().splitlines()
+        return (s[0] if s else type(e).__name__)[:160]
+
+    # heavy状態 (DB不要・最優先)
+    try:
+        out["heavy_running"] = is_heavy_running()
+        out["heavy_task"] = heavy_status().get("task")
+    except Exception as e:
+        warnings.append(f"heavy_status: {_short(e)}")
+
+    db = None
+    try:
+        db = SessionLocal()
+    except Exception as e:
+        warnings.append(f"db_connect: {_short(e)}")
+        out["status"] = "degraded"
+        return out
+
     try:
         # 今日のcandidates
-        cands_today = (db.query(Surge20Candidate)
-                       .filter(Surge20Candidate.candidate_date == today).count())
+        try:
+            out["candidates_today"] = (db.query(Surge20Candidate)
+                                       .filter(Surge20Candidate.candidate_date == today).count())
+        except Exception as e:
+            db.rollback(); warnings.append(f"candidates_today: {_short(e)}")
+
         # 今日のprediction保存 (type別)
         def _count_today(pt):
-            return (db.query(PredictionLog)
-                    .filter(PredictionLog.prediction_date == today)
-                    .filter(PredictionLog.prediction_type == pt).count())
-        main_today = _count_today("surge_20_prediction")
-        watch_today = _count_today("surge_20_watch_prediction")
-        rejected_today = _count_today("surge_20_rejected_watch")
-        late_chase_today = _count_today("surge_20_late_chase_watch")
+            try:
+                return (db.query(PredictionLog)
+                        .filter(PredictionLog.prediction_date == today)
+                        .filter(PredictionLog.prediction_type == pt).count())
+            except Exception as e:
+                db.rollback(); warnings.append(f"pred[{pt}]: {_short(e)}")
+                return 0
+        out["main_saved_today"] = _count_today("surge_20_prediction")
+        out["watch_saved_today"] = _count_today("surge_20_watch_prediction")
+        out["rejected_watch_saved_today"] = _count_today("surge_20_rejected_watch")
+        out["late_chase_watch_saved_today"] = _count_today("surge_20_late_chase_watch")
+
         # open surge_20 predictions
-        open_preds = (db.query(PredictionLog)
-                      .filter(PredictionLog.prediction_type.in_(SURGE_20_PREDICTION_TYPES))
-                      .filter(PredictionLog.status == "open").count())
+        try:
+            out["open_surge_20_predictions"] = (db.query(PredictionLog)
+                .filter(PredictionLog.prediction_type.in_(SURGE_20_PREDICTION_TYPES))
+                .filter(PredictionLog.status == "open").count())
+        except Exception as e:
+            db.rollback(); warnings.append(f"open_preds: {_short(e)}")
+
         # active locks
         now = datetime.utcnow()
         active_locks = []
-        for lk in db.query(AutomationLock).all():
-            if lk.expires_at and lk.expires_at > now:
-                active_locks.append(lk.lock_key)
+        try:
+            for lk in db.query(AutomationLock).all():
+                if lk.expires_at and lk.expires_at > now:
+                    active_locks.append(lk.lock_key)
+        except Exception as e:
+            db.rollback(); warnings.append(f"locks: {_short(e)}")
+        out["active_locks"] = active_locks
+
         # errors last 24h
-        err_cutoff = now - timedelta(hours=24)
-        errors_24h = db.query(AutomationError).filter(AutomationError.created_at >= err_cutoff).count()
+        try:
+            err_cutoff = now - timedelta(hours=24)
+            out["errors_last_24h"] = (db.query(AutomationError)
+                                      .filter(AutomationError.created_at >= err_cutoff).count())
+        except Exception as e:
+            db.rollback(); warnings.append(f"errors_24h: {_short(e)}")
 
-        # render_safe_to_run: in-memory heavy lock + active DB locks がなければ安全
-        safe = (not is_heavy_running()) and len(active_locks) == 0
-
-        return {
-            "status": "ok",
-            "active_locks": active_locks,
-            "heavy_running": is_heavy_running(),
-            "heavy_task": heavy_status().get("task"),
-            "candidates_today": cands_today,
-            "main_saved_today": main_today,
-            "watch_saved_today": watch_today,
-            "rejected_watch_saved_today": rejected_today,
-            "late_chase_watch_saved_today": late_chase_today,
-            "open_surge_20_predictions": open_preds,
-            "errors_last_24h": errors_24h,
-            "render_safe_to_run": safe,
-        }
+        # render_safe_to_run: heavy lock + active DB locks がなければ安全
+        out["render_safe_to_run"] = (not out["heavy_running"]) and len(active_locks) == 0
+        if warnings:
+            out["status"] = "degraded"
+            out["render_safe_to_run"] = False
+        return out
     finally:
         db.close()
 

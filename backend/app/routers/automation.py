@@ -30,17 +30,50 @@ def _check_secret(x_cron_secret: Optional[str], authorization: Optional[str], al
 # ===== ステータス (open) =====
 @router.get("/status")
 def status():
-    return clean_for_json(automation.get_automation_status())
+    """自動化ステータス。DB schema不整合等でも500にせず degraded を返す。"""
+    try:
+        return clean_for_json(automation.get_automation_status())
+    except Exception as e:
+        return {"status": "degraded", "error": _safe_err(e),
+                "hint": "schema migration が必要かもしれません: POST /api/automation/ensure-schema"}
 
 
 @router.get("/jobs")
 def jobs(limit: int = 50):
-    return clean_for_json({"items": automation.list_jobs(limit)})
+    try:
+        return clean_for_json({"items": automation.list_jobs(limit)})
+    except Exception as e:
+        return {"status": "degraded", "items": [], "error": _safe_err(e)}
 
 
 @router.get("/errors")
 def errors(limit: int = 50):
-    return clean_for_json({"items": automation.list_errors(limit)})
+    try:
+        return clean_for_json({"items": automation.list_errors(limit)})
+    except Exception as e:
+        return {"status": "degraded", "items": [], "error": _safe_err(e)}
+
+
+def _safe_err(e: Exception) -> str:
+    """例外メッセージを1行・短めに (秘密情報を含めない)。"""
+    s = str(e).strip().splitlines()
+    return (s[0] if s else type(e).__name__)[:300]
+
+
+# ===== schema migration (要 CRON_SECRET) =====
+@router.post("/ensure-schema")
+def ensure_schema_endpoint(x_cron_secret: Optional[str] = Header(None),
+                           authorization: Optional[str] = Header(None)):
+    """本番DBにモデル定義の不足テーブル/カラムを非破壊で追加する。
+    ADD COLUMN IF NOT EXISTS / CREATE TABLE IF NOT EXISTS のみ (DROP/TRUNCATE禁止)。"""
+    _check_secret(x_cron_secret, authorization)
+    try:
+        from app.database import ensure_schema
+        result = ensure_schema()
+        ok = len(result.get("errors", [])) == 0
+        return {"status": "ok" if ok else "partial", **result}
+    except Exception as e:
+        return {"status": "failed", "error": _safe_err(e)}
 
 
 # ===== 実行 (要 CRON_SECRET) =====
@@ -243,11 +276,39 @@ def run_surge_20_auto_orchestrator(req: TriggerRequest,
 def auto_save_surge_20_predictions(req: TriggerRequest,
                                     x_cron_secret: Optional[str] = Header(None),
                                     authorization: Optional[str] = Header(None)):
+    """軽量auto-save (lock付き)。schema不整合等でも500にせず degraded を返す。"""
     _check_secret(x_cron_secret, authorization)
-    return automation.auto_save_surge_20_predictions(
-        req.market or "JP", req.trigger_type or "cron",
-        20, 70.0,
-    )
+    lock_key = "surge20_auto_save_lock"
+    try:
+        if not automation.acquire_db_lock(lock_key, owner=f"auto_save_{req.market}"):
+            return {"status": "busy", "lock": lock_key}
+    except Exception as e:
+        return _degraded_schema_response(e)
+    try:
+        return clean_for_json(automation.auto_save_surge_20_predictions(
+            req.market or "JP", req.trigger_type or "cron", 20, 70.0,
+        ))
+    except Exception as e:
+        return _degraded_schema_response(e)
+    finally:
+        try:
+            automation.release_db_lock(lock_key)
+        except Exception:
+            pass
+
+
+def _degraded_schema_response(e: Exception) -> dict:
+    """DB例外時の共通レスポンス。schema不足の可能性を案内 (500を返さない)。"""
+    msg = _safe_err(e)
+    schema_keywords = ("does not exist", "no such column", "no such table",
+                       "undefinedcolumn", "undefined column", "relation",
+                       "has no column")
+    is_schema = any(k in msg.lower() for k in schema_keywords)
+    out = {"status": "degraded", "error": msg}
+    if is_schema:
+        out["message"] = "schema migration required"
+        out["hint"] = "POST /api/automation/ensure-schema を実行してください"
+    return out
 
 
 @router.post("/cleanup-stale-jobs")
@@ -256,34 +317,6 @@ def cleanup_stale_jobs(req: TriggerRequest,
                        authorization: Optional[str] = Header(None)):
     _check_secret(x_cron_secret, authorization)
     return automation.cleanup_stale_jobs(running_minutes=30)
-
-
-@router.post("/auto-save-surge-20-predictions")
-def auto_save_surge_20_predictions(req: TriggerRequest,
-                                    x_cron_secret: Optional[str] = Header(None),
-                                    authorization: Optional[str] = Header(None)):
-    """軽量auto-save (DBのcandidates_todayを読むだけ)。lock付き。"""
-    _check_secret(x_cron_secret, authorization)
-    from app.services import surge_20 as s20
-    lock_key = "surge20_auto_save_lock"
-    if not automation.acquire_db_lock(lock_key, owner=f"auto_save_{req.market}"):
-        return {"status": "busy", "lock": lock_key}
-    job_id = automation._create_job("auto-save-surge-20", req.market or "JP", req.trigger_type or "cron")
-    try:
-        result = s20.auto_save_top_candidates(market=req.market or "JP", limit=20, min_score=70.0)
-        automation._finish_job(
-            job_id, "completed",
-            predictions_saved=result.get("total_saved", 0),
-            positive_cases_created=result.get("main_saved", 0),
-            negative_cases_created=(result.get("rejected_watch_saved", 0) + result.get("late_chase_watch_saved", 0)),
-        )
-        return {"status": "ok", "job_id": job_id, **result}
-    except Exception as e:
-        automation._log_error(job_id, "", "auto_save", e)
-        automation._finish_job(job_id, "failed", error_message=str(e))
-        return {"status": "failed", "error": str(e)}
-    finally:
-        automation.release_db_lock(lock_key)
 
 
 @router.post("/review-surge-20-predictions")
@@ -299,8 +332,12 @@ def review_surge_20_predictions(req: TriggerRequest,
 def save_surge_20_reviews_as_training(req: TriggerRequest,
                                        x_cron_secret: Optional[str] = Header(None),
                                        authorization: Optional[str] = Header(None)):
+    """教師データ化。schema不整合等でも500にせず degraded を返す。"""
     _check_secret(x_cron_secret, authorization)
-    return automation.save_surge_20_reviews_as_training(req.trigger_type or "cron")
+    try:
+        return clean_for_json(automation.save_surge_20_reviews_as_training(req.trigger_type or "cron"))
+    except Exception as e:
+        return _degraded_schema_response(e)
 
 
 @router.post("/run-surge-20-expand-training")
