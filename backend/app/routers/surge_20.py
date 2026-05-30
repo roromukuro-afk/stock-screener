@@ -564,3 +564,83 @@ def candidates_today(market: Optional[str] = None, limit: int = 100):
 @router.get("/orchestrator-state")
 def orchestrator_state():
     return clean_for_json(surge_20.get_orchestrator_state())
+
+
+# ============== モデル版管理 (A/B & ロールバック) ==============
+@router.post("/snapshot-model-version")
+def snapshot_model_version(version_name: Optional[str] = None, activate: bool = True):
+    """現在の動的重み・閾値・学習データ件数を model_versions に保存。
+    A/B テスト・ロールバック用のスナップショット。"""
+    from app.database import SessionLocal
+    from app.models.models import (
+        ModelVersion, TrainingFeatureVector, Surge20Event, Surge20PreFeature,
+    )
+    from app.services.predictor import compute_dynamic_weights, NUMERIC_WEIGHTS, NUMERIC_SCALES
+    from datetime import datetime as _dt
+
+    weights = compute_dynamic_weights()
+    db = SessionLocal()
+    try:
+        pos_count = db.query(TrainingFeatureVector).filter(
+            TrainingFeatureVector.case_type.in_(["positive_surge", "semi_positive_surge"])).count()
+        neg_count = db.query(TrainingFeatureVector).filter(
+            TrainingFeatureVector.case_type.in_([
+                "negative_non_surge", "failed_overextended", "failed_weak_material",
+                "failed_material_exhaustion", "failed_bad_news",
+            ])).count()
+        ev_count = db.query(Surge20Event).count()
+        pf_count = db.query(Surge20PreFeature).count()
+        vname = version_name or f"v_{_dt.utcnow().strftime('%Y%m%d_%H%M%S')}"
+        # 同名チェック
+        existing = db.query(ModelVersion).filter(ModelVersion.version_name == vname).first()
+        if existing:
+            return {"status": "exists", "version_name": vname, "id": existing.id}
+        if activate:
+            db.query(ModelVersion).update({ModelVersion.active: False})
+        mv = ModelVersion(
+            version_name=vname,
+            training_case_count=pos_count + neg_count,
+            positive_count=pos_count,
+            negative_count=neg_count,
+            review_count=0,
+            weight_config={
+                "dynamic_weights": weights,
+                "base_weights": NUMERIC_WEIGHTS,
+                "scales": NUMERIC_SCALES,
+                "relative_day_weights": {"T-1": 3.0, "T-3": 2.0, "T-5": 1.5, "T-10": 1.0, "T-20": 0.5},
+                "label_thresholds": {
+                    "honmei_pos_min": 0.7, "honmei_diff_min": 0.1,
+                    "within_20d_pos_min": 0.6, "within_20d_diff_min": 0.05,
+                    "within_1m_pos_min": 0.5, "shutsdouhatsu_pos_min": 0.4,
+                },
+            },
+            performance_summary={
+                "events": ev_count, "pre_features": pf_count,
+                "snapshot_at": _dt.utcnow().isoformat(),
+            },
+            active=activate,
+        )
+        db.add(mv); db.commit()
+        return {"status": "ok", "id": mv.id, "version_name": vname,
+                "training_case_count": pos_count + neg_count, "active": activate}
+    finally:
+        db.close()
+
+
+@router.get("/model-versions")
+def list_model_versions(limit: int = 20):
+    """保存済モデル版一覧"""
+    from app.database import SessionLocal
+    from app.models.models import ModelVersion
+    db = SessionLocal()
+    try:
+        rows = db.query(ModelVersion).order_by(ModelVersion.id.desc()).limit(limit).all()
+        return clean_for_json({"items": [{
+            "id": r.id, "version_name": r.version_name, "active": r.active,
+            "training_case_count": r.training_case_count,
+            "positive_count": r.positive_count, "negative_count": r.negative_count,
+            "weight_config": r.weight_config, "performance_summary": r.performance_summary,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        } for r in rows]})
+    finally:
+        db.close()

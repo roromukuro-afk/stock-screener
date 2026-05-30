@@ -497,6 +497,9 @@ class Surge20PreFeature(Base):
     liquidity_score = Column(Float)
     overextension_score = Column(Float)
     entry_viability_score = Column(Float)
+    # 自己学習: このライブラリケースが将来の予測でhit/failに貢献した回数
+    track_hits = Column(Integer, default=0)
+    track_fails = Column(Integer, default=0)
     created_at = Column(DateTime, server_default=func.now())
 
 
@@ -528,6 +531,9 @@ class Surge20Candidate(Base):
     risk_summary = Column(Text)
     auto_saved_as_prediction = Column(Boolean, default=False)
     prediction_log_id = Column(Integer)
+    # 多horizon 確率分布 (within_3d/5d/10d/20d/1m) + マッチ理由 + 材料ブースト
+    horizon_distribution = Column(JSON)
+    catalyst_boost = Column(Float, default=0.0)
     created_at = Column(DateTime, server_default=func.now())
 
 

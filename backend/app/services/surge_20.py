@@ -1134,6 +1134,13 @@ def build_and_save_candidates(market: str = "JP", max_symbols: int = 200,
             stop = round(cp * 0.92, 2) if cp else None
             tp1 = round(cp * 1.10, 2) if cp else None
             tp2 = round(cp * 1.20, 2) if cp else None
+            # 多 horizon から最有力 horizon を選び prediction_horizon に反映
+            hd = c.get("horizon_distribution") or {}
+            best_h = max(hd.items(), key=lambda kv: kv[1])[0] if hd else "within_20d"
+            horizon_map = {"one_day": "next_day", "within_3d": "within_3d",
+                           "within_5d": "within_5d", "within_10d": "within_10d",
+                           "within_20d": "within_20d", "within_1m": "within_1m"}
+            pred_horizon = horizon_map.get(best_h, "within_20d")
             payload = {
                 "symbol": c["symbol"],
                 "market": c.get("market") or market,
@@ -1141,7 +1148,7 @@ def build_and_save_candidates(market: str = "JP", max_symbols: int = 200,
                 "candidate_date": today,
                 "final_surge_20_score": score,
                 "candidate_label": c.get("candidate_label"),
-                "prediction_horizon": "within_20d",
+                "prediction_horizon": pred_horizon,
                 "current_price": cp,
                 "entry_zone_low": entry_low,
                 "entry_zone_high": entry_high,
@@ -1154,7 +1161,10 @@ def build_and_save_candidates(market: str = "JP", max_symbols: int = 200,
                 "negative_similarity": c.get("negative_similarity"),
                 "similarity_gap": c.get("similarity_diff"),
                 "overextension_score": c.get("overextension_score"),
-                "reason_summary": f"pos={c.get('positive_similarity'):.2f} neg={c.get('negative_similarity'):.2f}",
+                "similar_past_20_events": c.get("similar_past_20_events"),
+                "horizon_distribution": c.get("horizon_distribution"),
+                "catalyst_boost": c.get("catalyst_boost"),
+                "reason_summary": f"pos={c.get('positive_similarity'):.2f} neg={c.get('negative_similarity'):.2f} horizon={pred_horizon}",
                 "risk_summary": (c.get("candidate_label") if c.get("candidate_label") in ("上がり切り警戒", "後追い危険", "negative類似高め") else None),
             }
             if existing:
@@ -1746,6 +1756,36 @@ def review_surge_20_predictions(limit: int = 200) -> Dict:
                 log.status = "reviewed"
             db.commit()
 
+            # ライブラリ自己学習: この予測の similar_past_20_events に紐づく
+            # Surge20PreFeature の track_hits / track_fails を更新
+            if result_label not in ("still_open", "insufficient_days"):
+                try:
+                    cand = (db.query(Surge20Candidate)
+                            .filter(Surge20Candidate.symbol == log.symbol)
+                            .filter(Surge20Candidate.candidate_date == log.prediction_date)
+                            .first())
+                    matched = (cand.similar_past_20_events if cand and isinstance(
+                        cand.similar_past_20_events, list) else None) or []
+                    is_hit = bool(hit_20) or ("success" in result_label)
+                    is_fail = result_label in ("failed", "false_breakout_failed", "watch_failed_under_10")
+                    if matched and (is_hit or is_fail):
+                        from app.models.models import Surge20PreFeature as _SPF
+                        for m in matched:
+                            cid = m.get("case_id")
+                            if not cid:
+                                continue
+                            row = db.query(_SPF).filter(_SPF.id == cid).first()
+                            if not row:
+                                continue
+                            if is_hit:
+                                row.track_hits = (row.track_hits or 0) + 1
+                            elif is_fail:
+                                row.track_fails = (row.track_fails or 0) + 1
+                        db.commit()
+                except Exception as e:
+                    db.rollback()
+                    print(f"library track update {lid} failed: {e}")
+
             if result_label == "still_open":
                 still_open_count += 1
             elif result_label == "insufficient_days":
@@ -1964,8 +2004,7 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
     db = SessionLocal()
     try:
         # 有効 event_id + 品質係数 (max_gain / days_to_hit) × 時間減衰
-        # 高品質 (大幅急騰・短期到達) かつ 直近のイベントほど類似度計算で重みが上がる
-        # 時間減衰: 0.5 + 0.5 * exp(-years/3.0) → 今日=1.0, 1年前=0.85, 3年=0.68, 10年=0.51
+        # event_type も読み込み (多horizon ラベル用)
         import math as _math
         from datetime import date as _date
         _today = _date.today()
@@ -1974,15 +2013,16 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
             Surge20Event.max_gain_percent,
             Surge20Event.days_to_hit_20,
             Surge20Event.event_start_date,
+            Surge20Event.event_type,
+            Surge20Event.symbol,
         ).all()
         event_ids = {e[0] for e in event_rows}
         event_quality: Dict[int, float] = {}
-        for eid, gain, days, sd in event_rows:
+        event_meta: Dict[int, Dict] = {}
+        for eid, gain, days, sd, etype, esym in event_rows:
             g = float(gain) if gain is not None else 20.0
             d = float(days) if days else 20.0
-            # gain quality: 20%を基準に 0.5〜2.0 にclip、days_to_hit が短いほど高品質
             qbase = min(2.0, max(0.5, g / 25.0)) * (20.0 / max(d, 5.0)) * 0.7
-            # 時間減衰
             try:
                 y, m, da = (int(x) for x in (sd or "2020-01-01").split("-")[:3])
                 years_ago = max(0.0, (_today - _date(y, m, da)).days / 365.0)
@@ -1990,6 +2030,11 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
                 years_ago = 5.0
             time_decay = 0.5 + 0.5 * _math.exp(-years_ago / 3.0)
             event_quality[eid] = max(0.2, min(2.0, qbase * time_decay))
+            event_meta[eid] = {
+                "symbol": esym, "event_date": sd, "event_type": etype,
+                "max_gain": float(gain) if gain is not None else None,
+                "days_to_hit": int(days) if days else None,
+            }
 
         # T0を除いた valid pre_features
         pres = (db.query(Surge20PreFeature)
@@ -1998,8 +2043,17 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
         valid_features = [p for p in pres if p.surge_event_id in event_ids]
         orphan_count = len(pres) - len(valid_features)
 
+        # ライブラリ自己学習: pre_feature ごとの track_hits/track_fails で品質を補正
+        # h>>f なら品質ブースト、f>h なら品質ペナルティ。データ未収集時は中立。
+        def _track_factor(h, f):
+            h = h or 0; f = f or 0
+            if h + f == 0:
+                return 1.0
+            return max(0.5, min(1.6, (h + 1.0) / (f + 1.0)))
+
         positive_library = [{
             "case_id": p.id,
+            "event_id": p.surge_event_id,
             "symbol": p.symbol,
             "case_type": "surge_20_positive",
             "t1_volume_ratio_20d": p.volume_ratio_20d,
@@ -2011,7 +2065,8 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
             "t1_overextension_score": p.overextension_score,
             "label_hit_20_percent": True,
             "relative_day": p.relative_day,
-            "quality": event_quality.get(p.surge_event_id, 1.0),
+            "quality": (event_quality.get(p.surge_event_id, 1.0)
+                        * _track_factor(getattr(p, "track_hits", 0), getattr(p, "track_fails", 0))),
         } for p in valid_features]
 
         # negative library: TrainingFeatureVector の失敗/非急騰ケースを使う
@@ -2046,6 +2101,26 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
     syms = universe_db.list_eligible_yahoo_symbols(
         markets=[market], max_count=max_symbols, include_adr=True, offset=start_offset,
     )
+
+    # 材料連動: 直近30日の最高 catalyst_quality_score を銘柄ごとに集計 → 高材料は+5%
+    catalyst_score: Dict[str, float] = {}
+    try:
+        from app.models.models import MaterialEvent
+        from datetime import timedelta as _td2
+        mcut = (date.today() - _td2(days=30)).isoformat()
+        dbm = SessionLocal()
+        try:
+            for sym_, sc in (dbm.query(MaterialEvent.symbol,
+                                       func.max(MaterialEvent.catalyst_quality_score))
+                             .filter(MaterialEvent.detected_at >= mcut)
+                             .filter(MaterialEvent.material_confirmed == True)
+                             .group_by(MaterialEvent.symbol).all()):
+                if sym_ and sc is not None:
+                    catalyst_score[sym_] = float(sc)
+        finally:
+            dbm.close()
+    except Exception:
+        pass
 
     # 銘柄ごとのトラックレコード (直近90日 surge-20 系予測の hit/fail)
     # 当たった銘柄は薄くプラス、外した銘柄は薄くマイナス → 運用するほど自己学習
@@ -2090,7 +2165,9 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
 
         # positive 類似: relative_day で層化マッチング + 過去急騰の品質で重み付け
         # T-1 (直前のセットアップ) を最重視し、T-3/T-5/T-10/T-20 ほど影響を下げる。
-        # 各 relative_day 内では quality (max_gain/days_to_hit由来) で重み付き top3 平均。
+        # 各 relative_day 内では quality (max_gain/days_to_hit/track-record由来) で重み付き平均。
+        # 追加: 全マッチから top-5 を選び similar_past_20_events に保存 (マッチ理由可視化)
+        # 追加: top-5 の event_type から多horizon 確率分布を算出
         RD_WEIGHT = {"T-1": 3.0, "T-3": 2.0, "T-5": 1.5, "T-10": 1.0, "T-20": 0.5}
         rd_buckets: Dict[str, list] = {rd: [] for rd in RD_WEIGHT}
         for c in positive_library:
@@ -2098,6 +2175,8 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
             if rd in rd_buckets:
                 rd_buckets[rd].append(c)
         rd_sims: Dict[str, float] = {}
+        # 全ヒットを保持してから top-5 を抽出する
+        all_matches = []  # (sim, lib_entry)
         for rd, entries in rd_buckets.items():
             if not entries:
                 continue
@@ -2106,6 +2185,7 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
                 dist = _numeric_distance(current, c, weights=dyn_weights)
                 sim = max(0.0, 1.0 - dist)
                 scored.append((sim, c.get("quality", 1.0)))
+                all_matches.append((sim, c))
             scored.sort(reverse=True, key=lambda x: x[0])
             top = scored[:5]
             wsum = sum(s * q for s, q in top)
@@ -2117,6 +2197,43 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
             positive_sim = wnum / wden if wden > 0 else 0.0
         else:
             positive_sim = 0.0
+
+        # top-5 マッチ理由 (similar_past_20_events) を組み立て
+        all_matches.sort(reverse=True, key=lambda x: x[0])
+        top5_matches = []
+        for sim, ent in all_matches[:5]:
+            meta = event_meta.get(ent.get("event_id"), {})
+            top5_matches.append({
+                "case_id": ent.get("case_id"),
+                "event_id": ent.get("event_id"),
+                "symbol": ent.get("symbol"),
+                "event_date": meta.get("event_date"),
+                "event_type": meta.get("event_type"),
+                "relative_day": ent.get("relative_day"),
+                "max_gain": meta.get("max_gain"),
+                "days_to_hit": meta.get("days_to_hit"),
+                "similarity": round(float(sim), 4),
+            })
+
+        # 多 horizon 確率分布: top-5 マッチの event_type を集計
+        horizon_dist: Dict[str, float] = {
+            "within_3d": 0.0, "within_5d": 0.0, "within_10d": 0.0,
+            "within_20d": 0.0, "within_1m": 0.0, "one_day": 0.0,
+        }
+        TYPE_BUCKET = {
+            "hit_20_within_3d": "within_3d", "hit_20_within_5d": "within_5d",
+            "hit_20_within_10d": "within_10d", "hit_20_within_20d": "within_20d",
+            "hit_20_within_1m": "within_1m",
+            "one_day_surge_20": "one_day", "one_day_intraday_surge_20": "one_day",
+        }
+        if top5_matches:
+            sim_sum = sum(m["similarity"] for m in top5_matches) or 1.0
+            for m in top5_matches:
+                bucket = TYPE_BUCKET.get(m.get("event_type"))
+                if bucket:
+                    horizon_dist[bucket] += m["similarity"]
+            for k in horizon_dist:
+                horizon_dist[k] = round(horizon_dist[k] / sim_sum, 3)
 
         # negative 類似 (TrainingFeatureVector の失敗ケース群との同じ距離指標)
         # 旧 hard-coded rule を廃止し、本物のデータ駆動マッチへ
@@ -2141,8 +2258,14 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
         hits = track_hits.get(sym, 0)
         fails = track_fails.get(sym, 0)
         if hits + fails > 0:
-            track_factor = (hits - fails * 0.5) / (hits + fails + 2.0)  # -0.25 〜 +0.33 程度
-            positive_sim = max(0.0, min(1.0, positive_sim + track_factor * 0.05))
+            tf = (hits - fails * 0.5) / (hits + fails + 2.0)
+            positive_sim = max(0.0, min(1.0, positive_sim + tf * 0.05))
+
+        # 材料ブースト: 直近30日の確認済 catalyst_quality_score 高いほど +最大5%
+        cat_sc = catalyst_score.get(sym) or catalyst_score.get(s.get("symbol", "")) or 0.0
+        cat_boost = min(0.05, max(0.0, (cat_sc - 50.0) / 1000.0))  # score>=70 で約2%、>=100 で5%
+        if cat_boost > 0:
+            positive_sim = max(0.0, min(1.0, positive_sim + cat_boost))
 
         if positive_sim < min_similarity:
             continue
@@ -2159,6 +2282,9 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
             "similarity_diff": round(positive_sim - negative_sim, 4),
             "avg_similarity_top5": round(positive_sim, 4),  # 後方互換
             "candidate_label": candidate_label,
+            "similar_past_20_events": top5_matches,
+            "horizon_distribution": horizon_dist,
+            "catalyst_boost": round(cat_boost, 4),
             "resistance_upside": current.get("t1_resistance_upside"),
             "ma25_deviation": current.get("t1_ma25_deviation"),
             "overextension_score": current.get("t1_overextension_score"),
