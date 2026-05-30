@@ -38,8 +38,39 @@ def _yahoo_symbol(symbol: str, market: str) -> str:
 
 
 def _fetch_ohlcv(yahoo_sym: str, market: str, move_date: str) -> Optional[pd.DataFrame]:
-    """T-80〜T+20 を含むに足る OHLCV を取得"""
-    # period="1y" で十分(過去1年のデータ)。本実装はサンプル/yfinance 両対応
+    """T-80〜T+20 を含むに足る OHLCV を取得。
+
+    まず historical_ohlcv (training_builder が蓄積したDBキャッシュ) を試し、
+    move_date を含む十分なバーがあればそれを返す (Yahoo へヒットしない・高速)。
+    無ければ従来通り live yfinance にフォールバック。
+    """
+    # 1) DBキャッシュ優先 (大量バックフィル時にRate Limit/OOMを回避)
+    try:
+        from app.database import SessionLocal
+        from app.models.models import HistoricalOHLCV
+        db = SessionLocal()
+        try:
+            rows = (db.query(HistoricalOHLCV)
+                    .filter(HistoricalOHLCV.symbol == yahoo_sym)
+                    .order_by(HistoricalOHLCV.date).all())
+        finally:
+            db.close()
+        if rows and len(rows) >= 20:
+            df_cached = pd.DataFrame([{
+                "date": r.date, "open": r.open, "high": r.high,
+                "low": r.low, "close": r.close, "volume": r.volume,
+            } for r in rows]).sort_values("date").reset_index(drop=True)
+            # move_date が含まれていれば採用
+            if move_date and (df_cached["date"].astype(str) <= move_date).any() and \
+               (df_cached["date"].astype(str) >= move_date).any():
+                return df_cached
+            # move_date 指定が無い or 範囲外なら、データ十分性のみで採用
+            if not move_date:
+                return df_cached
+    except Exception:
+        pass
+
+    # 2) Fallback: live yfinance (従来通り)
     df = get_stock_data(yahoo_sym, period="1y", market=market)
     if df is None or len(df) < 20:
         return None

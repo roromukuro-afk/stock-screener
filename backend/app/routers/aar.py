@@ -184,6 +184,72 @@ def csv_progress():
         return dict(_csv_progress)
 
 
+@router.post("/build-from-surge-events")
+def build_from_surge_events(market: Optional[str] = "JP", limit: int = 300,
+                             threshold_type: str = "surge_20"):
+    """既存の SurgeEvent (training_builder が検出した過去急騰) を
+    AAR分析にかけて教師データを一括追加する。
+    historical_ohlcv をDBから直接利用するため Yahoo 連打しない (Render-safe)。
+
+    - market: JP / US / None (全市場)
+    - limit:  今回のジョブで処理する最大件数 (重複除外後)
+    - threshold_type: surge_20 (20%急騰) / semi_surge_15 (15%準急騰)
+    """
+    if _csv_progress.get("running"):
+        raise HTTPException(409, "AAR処理が既に実行中です")
+    from app.database import SessionLocal
+    from app.models.models import SurgeEvent, AARInputCase
+
+    db = SessionLocal()
+    try:
+        q = db.query(SurgeEvent).filter(SurgeEvent.threshold_type == threshold_type)
+        if market:
+            q = q.filter(SurgeEvent.market == market)
+        # 新しい順に多めに引いて、既存とdedupしながら limit 件まで集める
+        events = q.order_by(SurgeEvent.event_date.desc()).limit(limit * 4).all()
+        existing = {(r.symbol, r.move_date)
+                    for r in db.query(AARInputCase.symbol, AARInputCase.move_date).all()}
+        rows: List[Dict] = []
+        for e in events:
+            key = (e.symbol, e.event_date)
+            if key in existing:
+                continue
+            existing.add(key)  # 同バッチ内重複も防ぐ
+            rows.append({
+                "move_date": e.event_date,
+                "symbol": e.symbol,
+                "market": e.market,
+                "yf_symbol": e.yahoo_symbol or e.symbol,
+                "name": e.name,
+                "move_percent": str(e.move_percent) if e.move_percent is not None else None,
+                "catalyst": None,
+                "news_source": None,
+            })
+            if len(rows) >= limit:
+                break
+        scanned = len(events)
+    finally:
+        db.close()
+
+    if not rows:
+        return {"status": "ok", "queued": 0, "scanned_events": scanned,
+                "message": "新規に追加できるイベントがありません (全て既存ケース)"}
+
+    src = f"surge-events-{threshold_type}-{market or 'ALL'}"
+    t = threading.Thread(
+        target=_process_csv_sync, args=(rows, src, limit, True), daemon=True,
+    )
+    t.start()
+    return {
+        "status": "started",
+        "queued": len(rows),
+        "scanned_events": scanned,
+        "threshold_type": threshold_type,
+        "market": market,
+        "note": "/api/aar/csv-progress で進捗確認",
+    }
+
+
 # ===== 学習データ一覧 =====
 @router.get("/cases")
 def list_cases(limit: int = 200, offset: int = 0, judgement: str = None):
