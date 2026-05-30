@@ -25,6 +25,7 @@ on:
           - status
           - test-cron-secret
           - ensure-schema
+          - aar-build-from-surge-events
           - run-daily-jp
           - run-daily-us
           - research-materials-daily
@@ -112,6 +113,15 @@ jobs:
           curl -sS --max-time 120 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
             -w "\nHTTP %{http_code}\n" \
             "$BACKEND_URL/api/automation/ensure-schema"
+
+      - name: Manual - aar-build-from-surge-events
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'aar-build-from-surge-events'
+        run: |
+          # 過去の SurgeEvent から AAR 教師ケースを 300件まで取り込み (重複除外・DB-first)
+          curl -sS --max-time 600 -X POST -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/aar/build-from-surge-events?market=JP&limit=300" || true
+          sleep 5
+          curl -sS --max-time 30 "$BACKEND_URL/api/aar/csv-progress" -w "\nHTTP %{http_code}\n" | head -c 500
 
       # ===== Schedule-based dispatch =====
       - name: JST 16:40 - JP daily + materials
@@ -244,6 +254,13 @@ jobs:
           curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" -d '{"trigger_type":"cron"}' \
             -w "\nHTTP %{http_code}\n" \
             "$BACKEND_URL/api/automation/run-training-builder-smallcap"
+          # 新たに検出された SurgeEvent を AAR 教師ケースへ取り込む (DB-first・非同期)
+          sleep 60
+          curl -sS --max-time 600 -X POST -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/aar/build-from-surge-events?market=JP&limit=300" || true
+          sleep 5
+          curl -sS --max-time 600 -X POST -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/aar/build-from-surge-events?market=US&limit=300" || true
 
       # ===== Manual dispatch =====
       - name: Manual - status
