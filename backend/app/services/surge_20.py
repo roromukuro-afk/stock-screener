@@ -1963,8 +1963,22 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
 
     db = SessionLocal()
     try:
-        # 有効 event_id
-        event_ids = {e[0] for e in db.query(Surge20Event.id).all()}
+        # 有効 event_id + 品質係数 (max_gain_percent / days_to_hit_20)
+        # 高い品質 (大幅急騰・短期到達) ほど類似度計算で重みが上がる
+        event_rows = db.query(
+            Surge20Event.id,
+            Surge20Event.max_gain_percent,
+            Surge20Event.days_to_hit_20,
+        ).all()
+        event_ids = {e[0] for e in event_rows}
+        event_quality: Dict[int, float] = {}
+        for eid, gain, days in event_rows:
+            g = float(gain) if gain is not None else 20.0
+            d = float(days) if days else 20.0
+            # gain 20% を基準に 0.5〜2.0、days 短いほど高い、合計を 0.3〜2.0 にclip
+            q = min(2.0, max(0.5, g / 25.0)) * (20.0 / max(d, 5.0)) * 0.7
+            event_quality[eid] = max(0.3, min(2.0, q))
+
         # T0を除いた valid pre_features
         pres = (db.query(Surge20PreFeature)
                 .filter(Surge20PreFeature.relative_day.in_(["T-20", "T-10", "T-5", "T-3", "T-1"]))
@@ -1985,6 +1999,7 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
             "t1_overextension_score": p.overextension_score,
             "label_hit_20_percent": True,
             "relative_day": p.relative_day,
+            "quality": event_quality.get(p.surge_event_id, 1.0),
         } for p in valid_features]
 
         # negative library: TrainingFeatureVector の失敗/非急騰ケースを使う
@@ -2031,13 +2046,35 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
         except Exception:
             continue
 
-        # positive 類似 (動的重み付き距離)
-        pos_scored = []
+        # positive 類似: relative_day で層化マッチング + 過去急騰の品質で重み付け
+        # T-1 (直前のセットアップ) を最重視し、T-3/T-5/T-10/T-20 ほど影響を下げる。
+        # 各 relative_day 内では quality (max_gain/days_to_hit由来) で重み付き top3 平均。
+        RD_WEIGHT = {"T-1": 3.0, "T-3": 2.0, "T-5": 1.5, "T-10": 1.0, "T-20": 0.5}
+        rd_buckets: Dict[str, list] = {rd: [] for rd in RD_WEIGHT}
         for c in positive_library:
-            dist = _numeric_distance(current, c, weights=dyn_weights)
-            pos_scored.append(max(0.0, 1.0 - dist))
-        pos_scored.sort(reverse=True)
-        positive_sim = sum(pos_scored[:5]) / max(1, len(pos_scored[:5])) if pos_scored else 0.0
+            rd = c.get("relative_day")
+            if rd in rd_buckets:
+                rd_buckets[rd].append(c)
+        rd_sims: Dict[str, float] = {}
+        for rd, entries in rd_buckets.items():
+            if not entries:
+                continue
+            scored = []
+            for c in entries:
+                dist = _numeric_distance(current, c, weights=dyn_weights)
+                sim = max(0.0, 1.0 - dist)
+                scored.append((sim, c.get("quality", 1.0)))
+            scored.sort(reverse=True, key=lambda x: x[0])
+            top = scored[:5]
+            wsum = sum(s * q for s, q in top)
+            qsum = sum(q for _, q in top)
+            rd_sims[rd] = (wsum / qsum) if qsum > 0 else 0.0
+        if rd_sims:
+            wnum = sum(RD_WEIGHT[rd] * s for rd, s in rd_sims.items())
+            wden = sum(RD_WEIGHT[rd] for rd in rd_sims)
+            positive_sim = wnum / wden if wden > 0 else 0.0
+        else:
+            positive_sim = 0.0
 
         # negative 類似 (TrainingFeatureVector の失敗ケース群との同じ距離指標)
         # 旧 hard-coded rule を廃止し、本物のデータ駆動マッチへ
