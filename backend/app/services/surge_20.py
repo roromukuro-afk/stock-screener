@@ -1963,21 +1963,33 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
 
     db = SessionLocal()
     try:
-        # 有効 event_id + 品質係数 (max_gain_percent / days_to_hit_20)
-        # 高い品質 (大幅急騰・短期到達) ほど類似度計算で重みが上がる
+        # 有効 event_id + 品質係数 (max_gain / days_to_hit) × 時間減衰
+        # 高品質 (大幅急騰・短期到達) かつ 直近のイベントほど類似度計算で重みが上がる
+        # 時間減衰: 0.5 + 0.5 * exp(-years/3.0) → 今日=1.0, 1年前=0.85, 3年=0.68, 10年=0.51
+        import math as _math
+        from datetime import date as _date
+        _today = _date.today()
         event_rows = db.query(
             Surge20Event.id,
             Surge20Event.max_gain_percent,
             Surge20Event.days_to_hit_20,
+            Surge20Event.event_start_date,
         ).all()
         event_ids = {e[0] for e in event_rows}
         event_quality: Dict[int, float] = {}
-        for eid, gain, days in event_rows:
+        for eid, gain, days, sd in event_rows:
             g = float(gain) if gain is not None else 20.0
             d = float(days) if days else 20.0
-            # gain 20% を基準に 0.5〜2.0、days 短いほど高い、合計を 0.3〜2.0 にclip
-            q = min(2.0, max(0.5, g / 25.0)) * (20.0 / max(d, 5.0)) * 0.7
-            event_quality[eid] = max(0.3, min(2.0, q))
+            # gain quality: 20%を基準に 0.5〜2.0 にclip、days_to_hit が短いほど高品質
+            qbase = min(2.0, max(0.5, g / 25.0)) * (20.0 / max(d, 5.0)) * 0.7
+            # 時間減衰
+            try:
+                y, m, da = (int(x) for x in (sd or "2020-01-01").split("-")[:3])
+                years_ago = max(0.0, (_today - _date(y, m, da)).days / 365.0)
+            except Exception:
+                years_ago = 5.0
+            time_decay = 0.5 + 0.5 * _math.exp(-years_ago / 3.0)
+            event_quality[eid] = max(0.2, min(2.0, qbase * time_decay))
 
         # T0を除いた valid pre_features
         pres = (db.query(Surge20PreFeature)
