@@ -2047,6 +2047,36 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
         markets=[market], max_count=max_symbols, include_adr=True, offset=start_offset,
     )
 
+    # 銘柄ごとのトラックレコード (直近90日 surge-20 系予測の hit/fail)
+    # 当たった銘柄は薄くプラス、外した銘柄は薄くマイナス → 運用するほど自己学習
+    track_hits: Dict[str, int] = {}
+    track_fails: Dict[str, int] = {}
+    try:
+        from datetime import timedelta as _td
+        cutoff = (date.today() - _td(days=90)).isoformat()
+        db2 = SessionLocal()
+        try:
+            from sqlalchemy import func as _sqlfunc
+            # hit: PredictionReview.hit_20_percent == True
+            hit_rows = (db2.query(PredictionLog.symbol, _sqlfunc.count())
+                        .join(PredictionReview, PredictionLog.id == PredictionReview.prediction_log_id)
+                        .filter(PredictionLog.prediction_type.in_(SURGE_20_PREDICTION_TYPES))
+                        .filter(PredictionLog.prediction_date >= cutoff)
+                        .filter(PredictionReview.hit_20_percent == True)
+                        .group_by(PredictionLog.symbol).all())
+            track_hits = {s: int(n) for s, n in hit_rows}
+            fail_rows = (db2.query(PredictionLog.symbol, _sqlfunc.count())
+                         .join(PredictionReview, PredictionLog.id == PredictionReview.prediction_log_id)
+                         .filter(PredictionLog.prediction_type.in_(SURGE_20_PREDICTION_TYPES))
+                         .filter(PredictionLog.prediction_date >= cutoff)
+                         .filter(PredictionReview.success_label == "失敗")
+                         .group_by(PredictionLog.symbol).all())
+            track_fails = {s: int(n) for s, n in fail_rows}
+        finally:
+            db2.close()
+    except Exception:
+        pass
+
     candidates = []
     for s in syms:
         sym = s["yahoo_symbol"]
@@ -2106,6 +2136,13 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
             negative_sim = min(1.0, negative_sim + 0.15)
         if upside < 5:
             negative_sim = min(1.0, negative_sim + 0.10)
+
+        # 銘柄トラックレコード補正 (運用するほど自己学習)
+        hits = track_hits.get(sym, 0)
+        fails = track_fails.get(sym, 0)
+        if hits + fails > 0:
+            track_factor = (hits - fails * 0.5) / (hits + fails + 2.0)  # -0.25 〜 +0.33 程度
+            positive_sim = max(0.0, min(1.0, positive_sim + track_factor * 0.05))
 
         if positive_sim < min_similarity:
             continue
