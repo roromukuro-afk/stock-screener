@@ -29,11 +29,15 @@ NUMERIC_SCALES = {
 }
 
 
-def _numeric_distance(a: Dict, b: Dict) -> float:
-    """重み付き正規化L1距離 (0=完全一致, 大きいほど離れる)"""
+def _numeric_distance(a: Dict, b: Dict, weights: Optional[Dict[str, float]] = None) -> float:
+    """重み付き正規化L1距離 (0=完全一致, 大きいほど離れる)。
+    weights を渡せば動的重み (判別力に応じた強調) を使う。None なら静的 NUMERIC_WEIGHTS。
+    """
+    if weights is None:
+        weights = NUMERIC_WEIGHTS
     total = 0.0
     weight_sum = 0.0
-    for k, w in NUMERIC_WEIGHTS.items():
+    for k, w in weights.items():
         va = a.get(k)
         vb = b.get(k)
         if va is None or vb is None:
@@ -44,6 +48,49 @@ def _numeric_distance(a: Dict, b: Dict) -> float:
     if weight_sum == 0:
         return 1.0
     return total / weight_sum
+
+
+def compute_dynamic_weights() -> Dict[str, float]:
+    """training_feature_vectors の positive/negative 平均値から
+    各特徴量の判別力 (|pos_avg - neg_avg| / scale) を測り、
+    NUMERIC_WEIGHTS の base に最大3倍の倍率を掛けて返す。
+    判別力が高い特徴量ほど距離計算で重要視される。失敗時は静的重みにフォールバック。
+    """
+    try:
+        from app.database import SessionLocal
+        from sqlalchemy import func
+        from app.models.models import TrainingFeatureVector as T
+        pos_cts = ["positive_surge", "semi_positive_surge"]
+        neg_cts = ["negative_non_surge", "failed_overextended",
+                   "failed_weak_material", "failed_material_exhaustion", "failed_bad_news"]
+        mapping = [
+            ("t1_volume_ratio_20d", "volume_ratio_20d"),
+            ("t1_price_change_5d", "price_change_5d"),
+            ("t1_price_change_20d", "price_change_20d"),
+            ("t1_ma25_deviation", "ma25_deviation"),
+            ("t1_support_distance", "support_distance"),
+            ("t1_resistance_upside", "resistance_upside"),
+            ("t1_overextension_score", "overextension_score"),
+        ]
+        db = SessionLocal()
+        try:
+            new_w: Dict[str, float] = {}
+            for tk, fld in mapping:
+                col = getattr(T, fld, None)
+                if col is None:
+                    new_w[tk] = NUMERIC_WEIGHTS.get(tk, 1.0)
+                    continue
+                pa = db.query(func.avg(col)).filter(T.case_type.in_(pos_cts)).scalar() or 0
+                na = db.query(func.avg(col)).filter(T.case_type.in_(neg_cts)).scalar() or 0
+                scale = NUMERIC_SCALES.get(tk, 1.0)
+                disc = min(1.0, abs(float(pa) - float(na)) / max(scale, 1e-6))
+                base = NUMERIC_WEIGHTS.get(tk, 1.0)
+                new_w[tk] = base * (1.0 + 2.0 * disc)
+            return new_w
+        finally:
+            db.close()
+    except Exception:
+        return dict(NUMERIC_WEIGHTS)
 
 
 def _categorical_match(a: Dict, b: Dict) -> int:

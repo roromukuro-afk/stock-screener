@@ -1955,7 +1955,11 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
     negative_similarity も同時計算し、候補分類する。
     start_offset: universe走査の開始位置 (rolling cursor 用)。
     """
-    from app.services.predictor import _numeric_distance, compute_current_features
+    from app.services.predictor import _numeric_distance, compute_current_features, compute_dynamic_weights
+    from app.models.models import TrainingFeatureVector as TFV
+
+    # データ駆動の動的重み (positive/negative の平均差から判別力を計算)
+    dyn_weights = compute_dynamic_weights()
 
     db = SessionLocal()
     try:
@@ -1983,15 +1987,27 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
             "relative_day": p.relative_day,
         } for p in valid_features]
 
-        # negative library
-        neg_rows = db.query(Surge20NegativeCase).limit(2000).all()
+        # negative library: TrainingFeatureVector の失敗/非急騰ケースを使う
+        # (旧実装は Surge20NegativeCase の symbol/reason だけでハードコードrule評価していた)
+        neg_case_types = [
+            "negative_non_surge", "failed_overextended",
+            "failed_weak_material", "failed_material_exhaustion", "failed_bad_news",
+        ]
+        neg_tfvs = (db.query(TFV)
+                    .filter(TFV.case_type.in_(neg_case_types))
+                    .limit(3000).all())
         negative_library = [{
-            "case_id": n.id,
-            "symbol": n.symbol,
-            "reason": n.reason,
-        } for n in neg_rows]
-        # negative の特徴量は別途取得 (簡易: asof_dateで近い pre_features を使う代わりに current featuresで距離計算)
-        # 簡易実装: positiveに似ていてもnegative_reasonの分布から類推
+            "case_id": t.id,
+            "symbol": t.symbol,
+            "case_type": t.case_type,
+            "t1_volume_ratio_20d": t.volume_ratio_20d,
+            "t1_price_change_5d": t.price_change_5d,
+            "t1_price_change_20d": t.price_change_20d,
+            "t1_ma25_deviation": t.ma25_deviation,
+            "t1_resistance_upside": t.resistance_upside,
+            "t1_support_distance": t.support_distance,
+            "t1_overextension_score": t.overextension_score,
+        } for t in neg_tfvs]
     finally:
         db.close()
 
@@ -2015,29 +2031,32 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
         except Exception:
             continue
 
-        # positive 類似
+        # positive 類似 (動的重み付き距離)
         pos_scored = []
         for c in positive_library:
-            dist = _numeric_distance(current, c)
+            dist = _numeric_distance(current, c, weights=dyn_weights)
             pos_scored.append(max(0.0, 1.0 - dist))
         pos_scored.sort(reverse=True)
         positive_sim = sum(pos_scored[:5]) / max(1, len(pos_scored[:5])) if pos_scored else 0.0
 
-        # negative similarity (簡易: 高 overextension/低 upside の現在状態が
-        # negative case の典型条件にどれだけ近いか)
-        negative_sim = 0.0
+        # negative 類似 (TrainingFeatureVector の失敗ケース群との同じ距離指標)
+        # 旧 hard-coded rule を廃止し、本物のデータ駆動マッチへ
+        if negative_library:
+            neg_scored = []
+            for n in negative_library:
+                dist = _numeric_distance(current, n, weights=dyn_weights)
+                neg_scored.append(max(0.0, 1.0 - dist))
+            neg_scored.sort(reverse=True)
+            negative_sim = sum(neg_scored[:5]) / max(1, len(neg_scored[:5]))
+        else:
+            negative_sim = 0.0
+        # 過熱・低出来高は学習データに表れにくいので、補強として小さくブースト
         overext = current.get("t1_overextension_score") or 0
         upside = current.get("t1_resistance_upside") or 0
-        pc5 = current.get("t1_price_change_5d") or 0
-        if overext >= 50:
-            negative_sim += 0.3
-        if upside < 10:
-            negative_sim += 0.3
-        if pc5 >= 30:
-            negative_sim += 0.2
-        if (current.get("t1_volume_ratio_20d") or 0) < 1.0:
-            negative_sim += 0.1
-        negative_sim = min(1.0, negative_sim)
+        if overext >= 70:
+            negative_sim = min(1.0, negative_sim + 0.15)
+        if upside < 5:
+            negative_sim = min(1.0, negative_sim + 0.10)
 
         if positive_sim < min_similarity:
             continue
