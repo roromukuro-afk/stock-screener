@@ -27,17 +27,55 @@ def _yahoo_symbol(sym: str, market: str) -> str:
 
 
 def _load_history(symbol: str) -> List[Dict]:
-    """historical_ohlcv から symbol の全行を date 昇順で取得"""
+    """historical_ohlcv から取得。空ならlive yfinanceから取って永続キャッシュ。"""
     db = SessionLocal()
     try:
         rows = (db.query(HistoricalOHLCV)
                 .filter(HistoricalOHLCV.symbol == symbol)
                 .order_by(HistoricalOHLCV.date).all())
-        return [{"date": r.date, "close": r.close,
-                 "high": r.high, "low": r.low,
-                 "open": r.open, "volume": r.volume} for r in rows]
+        if rows and len(rows) >= 30:
+            return [{"date": r.date, "close": r.close,
+                     "high": r.high, "low": r.low,
+                     "open": r.open, "volume": r.volume} for r in rows]
     finally:
         db.close()
+    # フォールバック: 3ヶ月分を live 取得して historical_ohlcv にキャッシュ (Render-safe・1銘柄ぶん)
+    try:
+        from app.services.price_fetcher import get_stock_data
+        df = get_stock_data(symbol, period="6mo")
+        if df is None or len(df) < 30:
+            return []
+        df = df.sort_values("date").reset_index(drop=True)
+        # キャッシュへ書き戻し (idempotent)
+        db = SessionLocal()
+        try:
+            for _, r in df.iterrows():
+                d_str = str(r.get("date") or "")[:10]
+                if not d_str:
+                    continue
+                exists = (db.query(HistoricalOHLCV.id)
+                          .filter(HistoricalOHLCV.symbol == symbol)
+                          .filter(HistoricalOHLCV.date == d_str).first())
+                if exists:
+                    continue
+                db.add(HistoricalOHLCV(
+                    symbol=symbol, yahoo_symbol=symbol, date=d_str,
+                    open=float(r.get("open") or 0) or None,
+                    high=float(r.get("high") or 0) or None,
+                    low=float(r.get("low") or 0) or None,
+                    close=float(r.get("close") or 0) or None,
+                    volume=float(r.get("volume") or 0) or None,
+                    data_source="live_yfinance_fallback",
+                ))
+            db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
+        return df.to_dict(orient="records")
+    except Exception as e:
+        logger.warning(f"_load_history live fallback {symbol} failed: {e}")
+        return []
 
 
 def _normalize_date(s: str) -> Optional[str]:
