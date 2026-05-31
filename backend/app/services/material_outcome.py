@@ -47,10 +47,15 @@ def _load_history(symbol: str) -> List[Dict]:
                          "open": r.open, "volume": r.volume} for r in rows]
     finally:
         db.close()
-    # フォールバック: 3ヶ月分を live 取得して historical_ohlcv にキャッシュ (Render-safe・1銘柄ぶん)
+    # フォールバック: 複数の symbol 形式で yfinance を試し、historical_ohlcv にキャッシュ
     try:
         from app.services.price_fetcher import get_stock_data
-        df = get_stock_data(symbol, period="6mo")
+        df = None
+        for try_sym in candidates:
+            df = get_stock_data(try_sym, period="6mo")
+            if df is not None and len(df) >= 30:
+                symbol = try_sym  # 成功した形式で保存
+                break
         if df is None or len(df) < 30:
             return []
         df = df.sort_values("date").reset_index(drop=True)
@@ -73,7 +78,7 @@ def _load_history(symbol: str) -> List[Dict]:
                     low=float(r.get("low") or 0) or None,
                     close=float(r.get("close") or 0) or None,
                     volume=float(r.get("volume") or 0) or None,
-                    data_source="live_yfinance_fallback",
+                    data_source="material_outcome_fallback",
                 ))
             db.commit()
         except Exception:
