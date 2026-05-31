@@ -967,6 +967,25 @@ class MaterialEvent(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class MacroIndicator(Base):
+    """マクロ指標 (USD/JPY, Nikkei225, TOPIX, VIX, 10yr 等) の日次値。
+    リスクオン/オフ判定や為替感応度の計算に使用。"""
+    __tablename__ = "macro_indicators"
+    id = Column(Integer, primary_key=True, index=True)
+    indicator_code = Column(String, index=True)  # USDJPY / NIKKEI225 / TOPIX / VIX / TNX / SOX
+    indicator_name = Column(String)
+    date = Column(String, index=True)
+    close = Column(Float)
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    volume = Column(Float)
+    change_1d_percent = Column(Float)
+    change_5d_percent = Column(Float)
+    change_20d_percent = Column(Float)
+    fetched_at = Column(DateTime, server_default=func.now())
+
+
 class MaterialOutcome(Base):
     """各 MaterialEvent が公開後に株価をどう動かしたかを記録 (材料→結果の検証用)"""
     __tablename__ = "material_outcomes"

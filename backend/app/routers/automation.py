@@ -210,6 +210,28 @@ def material_source_effectiveness(min_samples: int = 5):
         return {"status": "degraded", "items": [], "error": _safe_err(e)}
 
 
+@router.post("/collect-macro-indicators")
+def collect_macro_indicators_endpoint(x_cron_secret: Optional[str] = Header(None),
+                                      authorization: Optional[str] = Header(None)):
+    """USD/JPY, Nikkei225, TOPIX, VIX, 10yr, SOX, S&P500 等を Yahoo から日次取得"""
+    _check_secret(x_cron_secret, authorization)
+    try:
+        from app.services import macro_collector
+        return clean_for_json(macro_collector.collect_macro_indicators(period="3mo"))
+    except Exception as e:
+        return _degraded_schema_response(e)
+
+
+@router.get("/macro-snapshot")
+def macro_snapshot():
+    """マクロ指標の最新値 + リスクオン/オフ判定 (公開)"""
+    try:
+        from app.services import macro_collector
+        return clean_for_json(macro_collector.get_latest_snapshot())
+    except Exception as e:
+        return {"status": "degraded", "indicators": {}, "error": _safe_err(e)}
+
+
 @router.get("/materials-summary")
 def materials_summary(limit_recent: int = 10):
     """material_events のソース別件数 + 最近のサンプル (EDINET / TDnet / RSS 等の効果を可視化)"""

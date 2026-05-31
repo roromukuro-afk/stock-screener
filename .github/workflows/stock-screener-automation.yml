@@ -27,6 +27,7 @@ on:
           - ensure-schema
           - aar-build-from-surge-events
           - compute-material-outcomes
+          - collect-macro-indicators
           - run-daily-jp
           - run-daily-us
           - research-materials-daily
@@ -115,6 +116,13 @@ jobs:
             -w "\nHTTP %{http_code}\n" \
             "$BACKEND_URL/api/automation/ensure-schema"
 
+      - name: Manual - collect-macro-indicators
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'collect-macro-indicators'
+        run: |
+          curl -sS --max-time 300 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/collect-macro-indicators"
+
       - name: Manual - compute-material-outcomes
         if: github.event_name == 'workflow_dispatch' && inputs.job == 'compute-material-outcomes'
         run: |
@@ -199,6 +207,10 @@ jobs:
       - name: JST 16:30 JP - cleanup + full_light orchestrator
         if: github.event_name == 'schedule' && github.event.schedule == '30 7 * * 1-5'
         run: |
+          # 0. マクロ指標 (USD/JPY, Nikkei225, TOPIX, VIX, SOX 等) を更新
+          curl -sS --max-time 300 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/collect-macro-indicators" || echo "macro skipped"
           # 1. stale掃除 (軽い)
           curl -sS --max-time 60 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
             -d '{"trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
