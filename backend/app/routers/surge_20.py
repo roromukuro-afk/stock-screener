@@ -555,6 +555,11 @@ def candidates_today(market: Optional[str] = None, limit: int = 100):
                 "risk_summary": r.risk_summary,
                 "auto_saved_as_prediction": r.auto_saved_as_prediction,
                 "prediction_log_id": r.prediction_log_id,
+                # 新フィールド: マッチ理由 / 多horizon 確率 / 材料ブースト / 予測horizon
+                "similar_past_20_events": r.similar_past_20_events,
+                "horizon_distribution": getattr(r, "horizon_distribution", None),
+                "catalyst_boost": getattr(r, "catalyst_boost", None),
+                "prediction_horizon": r.prediction_horizon,
             } for r in rows],
         })
     finally:
