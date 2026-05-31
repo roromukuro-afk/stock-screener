@@ -313,6 +313,27 @@ _US_NEWS_FEEDS = [
 ]
 
 
+def _normalize_pubdate(s: str) -> str:
+    """RSS pubDate / EDINET 形式を YYYY-MM-DD に正規化。失敗時は今日。"""
+    if not s:
+        return date.today().isoformat()
+    s = s.strip()
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    # RFC822: Mon, 30 May 2026 09:32:00 +0900
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(s)
+        if dt:
+            return dt.date().isoformat()
+    except Exception:
+        pass
+    # ISO with T
+    if "T" in s:
+        return s.split("T")[0]
+    return date.today().isoformat()
+
+
 def _build_name_to_sym_map(market: str) -> Dict[str, str]:
     try:
         from app.services import universe_db
@@ -360,7 +381,7 @@ def fetch_news_for_universe(market: str = "JP", max_feed_items: int = 50) -> Lis
                     "symbol": hit_sym, "code": hit_sym, "name": hit_name,
                     "title": it.get("title"),
                     "source_url": it.get("link") or f"news:{src}/{hash(it.get('title') or '') & 0xffffffff}",
-                    "published_at": (it.get("pubDate") or date.today().isoformat())[:30],
+                    "published_at": _normalize_pubdate(it.get("pubDate") or ""),
                     "source_type": src,
                     "source_rank": "二次",  # 主要メディアは二次情報
                     "market": market,
