@@ -27,16 +27,24 @@ def _yahoo_symbol(sym: str, market: str) -> str:
 
 
 def _load_history(symbol: str) -> List[Dict]:
-    """historical_ohlcv から取得。空ならlive yfinanceから取って永続キャッシュ。"""
+    """historical_ohlcv から取得。複数 symbol 形式を試し、無ければ live yfinance fallback。"""
+    # symbol / yahoo_symbol いずれの形式でも当たるよう複数キーで検索
+    candidates = [symbol]
+    if symbol.endswith(".T"):
+        candidates.append(symbol[:-2])  # 4桁コード
+    elif "." not in symbol:
+        candidates.append(f"{symbol}.T")
     db = SessionLocal()
     try:
-        rows = (db.query(HistoricalOHLCV)
-                .filter(HistoricalOHLCV.symbol == symbol)
-                .order_by(HistoricalOHLCV.date).all())
-        if rows and len(rows) >= 30:
-            return [{"date": r.date, "close": r.close,
-                     "high": r.high, "low": r.low,
-                     "open": r.open, "volume": r.volume} for r in rows]
+        for try_sym in candidates:
+            rows = (db.query(HistoricalOHLCV)
+                    .filter((HistoricalOHLCV.symbol == try_sym) |
+                            (HistoricalOHLCV.yahoo_symbol == try_sym))
+                    .order_by(HistoricalOHLCV.date).all())
+            if rows and len(rows) >= 30:
+                return [{"date": r.date, "close": r.close,
+                         "high": r.high, "low": r.low,
+                         "open": r.open, "volume": r.volume} for r in rows]
     finally:
         db.close()
     # フォールバック: 3ヶ月分を live 取得して historical_ohlcv にキャッシュ (Render-safe・1銘柄ぶん)
@@ -204,6 +212,7 @@ def compute_material_outcomes(lookback_days: int = 60, max_events: int = 500) ->
     insufficient = 0
     hit_20_count = 0
     hit_10_count = 0
+    sample_failures = []  # symbol別失敗理由のサンプル
 
     for ev in events:
         try:
@@ -214,6 +223,10 @@ def compute_material_outcomes(lookback_days: int = 60, max_events: int = 500) ->
         processed += 1
         if result is None:
             skipped_no_data += 1
+            if len(sample_failures) < 5:
+                sample_failures.append({"event_id": ev.id, "symbol": ev.symbol,
+                                        "yahoo_symbol": ev.yahoo_symbol,
+                                        "published_at": (ev.published_at or "")[:25]})
             continue
         if result.get("insufficient_data"):
             insufficient += 1
@@ -269,6 +282,7 @@ def compute_material_outcomes(lookback_days: int = 60, max_events: int = 500) ->
         "hit_20_count": hit_20_count,
         "hit_10_count": hit_10_count,
         "events_examined": len(events),
+        "sample_failures": sample_failures,
     }
 
 
