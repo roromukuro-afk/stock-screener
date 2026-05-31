@@ -2,6 +2,7 @@
 import os
 import threading
 from typing import Optional
+from datetime import date, timedelta as _td
 from fastapi import APIRouter, HTTPException, Header, Request
 from pydantic import BaseModel
 
@@ -171,6 +172,44 @@ def research_materials_daily(req: TriggerRequest,
     from app.services import material_auto_collector
     _run_async(material_auto_collector.collect_all_materials_daily)
     return {"status": "started", "job_type": "research-materials-daily"}
+
+
+@router.get("/materials-summary")
+def materials_summary(limit_recent: int = 10):
+    """material_events のソース別件数 + 最近のサンプル (EDINET / TDnet / RSS 等の効果を可視化)"""
+    from app.database import SessionLocal
+    from app.models.models import MaterialEvent
+    from sqlalchemy import func as _f
+    db = SessionLocal()
+    try:
+        total = db.query(MaterialEvent).count()
+        by_type = dict(db.query(MaterialEvent.source_type, _f.count())
+                       .group_by(MaterialEvent.source_type).all())
+        by_rank = dict(db.query(MaterialEvent.source_rank, _f.count())
+                       .group_by(MaterialEvent.source_rank).all())
+        by_category = dict(db.query(MaterialEvent.catalyst_category, _f.count())
+                           .group_by(MaterialEvent.catalyst_category).all())
+        cutoff = (date.today() - _td(days=30)).isoformat()
+        high_quality_recent = (db.query(MaterialEvent)
+                               .filter(MaterialEvent.detected_at >= cutoff)
+                               .filter(MaterialEvent.catalyst_quality_score >= 70)
+                               .order_by(MaterialEvent.detected_at.desc())
+                               .limit(limit_recent).all())
+        items = [{
+            "id": r.id, "symbol": r.symbol, "market": r.market,
+            "title": (r.title or "")[:120],
+            "source_type": r.source_type, "source_rank": r.source_rank,
+            "catalyst_category": r.catalyst_category,
+            "catalyst_quality_score": r.catalyst_quality_score,
+            "published_at": r.published_at,
+        } for r in high_quality_recent]
+        return clean_for_json({
+            "total": total, "by_source_type": by_type,
+            "by_source_rank": by_rank, "by_catalyst_category": by_category,
+            "high_quality_recent": items,
+        })
+    finally:
+        db.close()
 
 
 @router.post("/research-materials-jp")
