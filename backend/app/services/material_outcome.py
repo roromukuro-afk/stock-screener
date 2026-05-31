@@ -40,6 +40,25 @@ def _load_history(symbol: str) -> List[Dict]:
         db.close()
 
 
+def _normalize_date(s: str) -> Optional[str]:
+    """RSS pubDate / ISO / YYYY-MM-DD いずれも YYYY-MM-DD に。失敗時 None。"""
+    if not s:
+        return None
+    s = s.strip()
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-" and s[:4].isdigit():
+        return s[:10]
+    if "T" in s and s.split("T")[0].count("-") == 2:
+        return s.split("T")[0]
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(s)
+        if dt:
+            return dt.date().isoformat()
+    except Exception:
+        pass
+    return None
+
+
 def _find_index_at_or_after(rows: List[Dict], target_date: str) -> Optional[int]:
     """target_date 以降の最初の取引日 index"""
     for i, r in enumerate(rows):
@@ -51,7 +70,13 @@ def _find_index_at_or_after(rows: List[Dict], target_date: str) -> Optional[int]
 def compute_outcome_for_event(ev: MaterialEvent) -> Optional[Dict]:
     """1件の MaterialEvent について outcome 指標を計算 (historical_ohlcv 必須)"""
     sym = _yahoo_symbol(ev.yahoo_symbol or ev.symbol, ev.market or "JP")
-    pub = (ev.published_at or "")[:10]
+    # 旧 RFC822 などの published_at を YYYY-MM-DD に正規化 (None なら detected_at にフォールバック)
+    pub = _normalize_date(ev.published_at or "")
+    if not pub and ev.detected_at:
+        try:
+            pub = ev.detected_at.date().isoformat()
+        except Exception:
+            pub = None
     if not pub:
         return None
     rows = _load_history(sym)
@@ -125,11 +150,11 @@ def compute_material_outcomes(lookback_days: int = 60, max_events: int = 500) ->
     """
     db: Session = SessionLocal()
     try:
-        cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
+        # detected_at で粗くフィルタ (published_at のフォーマット差異に依らない)
+        cutoff_dt = date.today() - timedelta(days=lookback_days)
         events = (db.query(MaterialEvent)
-                  .filter(MaterialEvent.published_at >= cutoff)
-                  .filter(MaterialEvent.published_at <= date.today().isoformat())
-                  .order_by(MaterialEvent.published_at.desc())
+                  .filter(MaterialEvent.detected_at >= cutoff_dt)
+                  .order_by(MaterialEvent.detected_at.desc())
                   .limit(max_events).all())
     finally:
         db.close()
@@ -171,7 +196,8 @@ def compute_material_outcomes(lookback_days: int = 60, max_events: int = 500) ->
                 "catalyst_category": ev.catalyst_category,
                 "source_type": ev.source_type,
                 "source_rank": ev.source_rank,
-                "published_at": (ev.published_at or "")[:10],
+                "published_at": (_normalize_date(ev.published_at or "")
+                                 or (ev.detected_at.date().isoformat() if ev.detected_at else None)),
             }
             payload = {**base, **{k: v for k, v in result.items()
                                   if k in ("event_close", "t1_close", "t3_close",

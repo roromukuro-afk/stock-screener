@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 MACRO_TICKERS = [
     ("USDJPY", "JPY=X", "USD/JPY 為替"),
     ("NIKKEI225", "^N225", "日経平均株価"),
-    ("TOPIX", "^TPX", "TOPIX"),
-    ("MOTHERS", "1563.T", "東証マザーズ ETF"),  # 代替
+    ("TOPIX", "1306.T", "TOPIX (連動ETF 1306)"),  # 公式 ^TPX 系は Yahoo 取得不可なので連動ETFで代替
+    ("MOTHERS", "1563.T", "マザーズ ETF (代替)"),
     ("VIX", "^VIX", "VIX 恐怖指数"),
     ("TNX", "^TNX", "米10年金利"),
     ("SOX", "^SOX", "SOX 半導体指数"),
