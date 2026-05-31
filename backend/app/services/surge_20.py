@@ -2102,23 +2102,64 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
         markets=[market], max_count=max_symbols, include_adr=True, offset=start_offset,
     )
 
-    # 材料連動: 直近30日の最高 catalyst_quality_score を銘柄ごとに集計 → 高材料は+5%
+    # 材料連動: 直近30日の最高 catalyst_quality_score を銘柄ごとに集計
+    # + カテゴリ別の empirical hit_20率 を MaterialOutcome から学習 (発火時はその率で動的ブースト)
     catalyst_score: Dict[str, float] = {}
+    catalyst_category_by_sym: Dict[str, str] = {}
+    empirical_hit_rate_by_cat: Dict[str, float] = {}
     try:
-        from app.models.models import MaterialEvent
+        from app.models.models import MaterialEvent, MaterialOutcome
         from datetime import timedelta as _td2
         mcut = (date.today() - _td2(days=30)).isoformat()
         dbm = SessionLocal()
         try:
-            for sym_, sc in (dbm.query(MaterialEvent.symbol,
-                                       func.max(MaterialEvent.catalyst_quality_score))
-                             .filter(MaterialEvent.detected_at >= mcut)
-                             .filter(MaterialEvent.material_confirmed == True)
-                             .group_by(MaterialEvent.symbol).all()):
+            rows = (dbm.query(MaterialEvent.symbol,
+                              func.max(MaterialEvent.catalyst_quality_score),
+                              func.max(MaterialEvent.catalyst_category))
+                    .filter(MaterialEvent.detected_at >= mcut)
+                    .filter(MaterialEvent.material_confirmed == True)
+                    .group_by(MaterialEvent.symbol).all())
+            for sym_, sc, cat in rows:
                 if sym_ and sc is not None:
                     catalyst_score[sym_] = float(sc)
+                    if cat:
+                        catalyst_category_by_sym[sym_] = cat
+            # カテゴリ別 empirical hit率 (insufficient_data=False のサンプルから)
+            from sqlalchemy import Integer as _Int
+            for cat, n, h20 in (dbm.query(
+                MaterialOutcome.catalyst_category,
+                func.count(MaterialOutcome.id),
+                func.sum(MaterialOutcome.hit_20_percent_within_20d.cast(_Int)),
+            ).filter(MaterialOutcome.insufficient_data == False)
+                    .group_by(MaterialOutcome.catalyst_category).all()):
+                if cat and (n or 0) >= 3:  # 最低3サンプル
+                    empirical_hit_rate_by_cat[cat] = float(h20 or 0) / float(n or 1)
         finally:
             dbm.close()
+    except Exception:
+        pass
+
+    # マクロ・リスクレジーム読み込み: risk_off → 厳しめ閾値、risk_on → 緩め
+    risk_regime = "neutral"
+    macro_indicators: Dict = {}
+    try:
+        from app.services.macro_collector import get_latest_snapshot as _macro_snap
+        snap = _macro_snap()
+        risk_regime = snap.get("risk_regime", "neutral")
+        macro_indicators = snap.get("indicators", {}) or {}
+    except Exception:
+        pass
+    # min_similarity を risk_regime で動的調整
+    if risk_regime == "risk_off":
+        min_similarity = max(min_similarity, 0.5)  # 厳しめ (誤判定を減らす)
+    elif risk_regime == "risk_on":
+        min_similarity = max(0.35, min_similarity * 0.9)  # 緩め (機会を広く拾う)
+
+    # USD/JPY ヒストリ (最新60日) → 各銘柄との相関で為替感応度を見るための材料
+    usdjpy_recent_change_5d = None
+    try:
+        if "USDJPY" in macro_indicators:
+            usdjpy_recent_change_5d = macro_indicators["USDJPY"].get("change_5d_percent")
     except Exception:
         pass
 
@@ -2261,9 +2302,20 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
             tf = (hits - fails * 0.5) / (hits + fails + 2.0)
             positive_sim = max(0.0, min(1.0, positive_sim + tf * 0.05))
 
-        # 材料ブースト: 直近30日の確認済 catalyst_quality_score 高いほど +最大5%
+        # 材料ブースト: empirical hit_20率 (MaterialOutcomeから学習) があればそれを優先
+        # 無ければ静的 catalyst_quality_score ベースにフォールバック
         cat_sc = catalyst_score.get(sym) or catalyst_score.get(s.get("symbol", "")) or 0.0
-        cat_boost = min(0.05, max(0.0, (cat_sc - 50.0) / 1000.0))  # score>=70 で約2%、>=100 で5%
+        cat_name = catalyst_category_by_sym.get(sym) or catalyst_category_by_sym.get(s.get("symbol", ""))
+        if cat_name and cat_name in empirical_hit_rate_by_cat:
+            # empirical: hit_20率 50%なら +5%、30%なら +3%、10%なら +1%
+            cat_boost = min(0.08, max(0.0, empirical_hit_rate_by_cat[cat_name] * 0.10))
+        else:
+            cat_boost = min(0.05, max(0.0, (cat_sc - 50.0) / 1000.0))
+        # risk_regime に応じてブースト幅を変える (リスクオフ時はカタリスト効果が小さい傾向)
+        if risk_regime == "risk_off":
+            cat_boost *= 0.5
+        elif risk_regime == "risk_on":
+            cat_boost *= 1.2
         if cat_boost > 0:
             positive_sim = max(0.0, min(1.0, positive_sim + cat_boost))
 
@@ -2309,4 +2361,9 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
         "candidates_count": len(candidates),
         "by_label": by_label,
         "candidates_top50": candidates[:50],
+        # マクロ・empirical 文脈情報 (このbuildで使われた値の透明性)
+        "risk_regime": risk_regime,
+        "min_similarity_used": min_similarity,
+        "usdjpy_5d_change_pct": usdjpy_recent_change_5d,
+        "empirical_hit_rate_by_category": empirical_hit_rate_by_cat,
     }

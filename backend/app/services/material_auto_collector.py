@@ -253,12 +253,24 @@ def fetch_edinet_disclosures(target_date: Optional[str] = None, max_items: int =
             submit_dt = d.get("submitDateTime") or target_date
             src_url = (f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}?type=2"
                        if doc_id else f"edinet:{sec_code}-{submit_dt}")
+            # docDescription から書類種別を抽出して source_type を細分化
+            # 大量保有報告書 (5%ルール超え→需給に直接効く) / 役員報告書 (インサイダー動向)
+            # /公開買付届出書 (M&A) は特に株価インパクトが大きい
+            sub_type = "edinet"
+            if "大量保有報告書" in doc_desc or "5%" in doc_desc:
+                sub_type = "edinet_5pct_holding"
+            elif "役員報告書" in doc_desc or "売却" in doc_desc or "取得" in doc_desc:
+                sub_type = "edinet_insider"
+            elif "公開買付" in doc_desc or "TOB" in doc_desc:
+                sub_type = "edinet_tob"
+            elif "有価証券届出書" in doc_desc or "発行登録" in doc_desc:
+                sub_type = "edinet_issuance"  # 増資・新株予約権 → 希薄化リスク
             items.append({
                 "symbol": sym, "code": sym, "name": filer_name,
                 "title": f"{filer_name}: {doc_desc}" if filer_name else doc_desc,
                 "source_url": src_url,
                 "published_at": (submit_dt[:10] if submit_dt else target_date),
-                "source_type": "edinet",
+                "source_type": sub_type,
                 "source_rank": "一次",  # EDINET は公式開示 → 一次
                 "market": "JP",
             })
