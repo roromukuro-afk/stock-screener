@@ -174,6 +174,42 @@ def research_materials_daily(req: TriggerRequest,
     return {"status": "started", "job_type": "research-materials-daily"}
 
 
+@router.post("/compute-material-outcomes")
+def compute_material_outcomes_endpoint(x_cron_secret: Optional[str] = Header(None),
+                                       authorization: Optional[str] = Header(None)):
+    """直近60日の MaterialEvent の outcome (T+1/3/5/10/20 と hit_20 等) を一括計算。
+    historical_ohlcv キャッシュから読むため Render-safe (live fetch 無し)。
+    """
+    _check_secret(x_cron_secret, authorization)
+    try:
+        from app.services import material_outcome
+        r = material_outcome.compute_material_outcomes(lookback_days=60, max_events=500)
+        return clean_for_json(r)
+    except Exception as e:
+        return _degraded_schema_response(e)
+
+
+@router.get("/material-category-performance")
+def material_category_performance(min_samples: int = 3):
+    """カテゴリ × ソース別の hit_20 率・平均 max_gain・サンプル数。
+    どの種類の材料が本当に株価を動かすか empirical に検証する。"""
+    try:
+        from app.services import material_outcome
+        return clean_for_json(material_outcome.get_category_performance(min_samples=min_samples))
+    except Exception as e:
+        return {"status": "degraded", "items": [], "error": _safe_err(e)}
+
+
+@router.get("/material-source-effectiveness")
+def material_source_effectiveness(min_samples: int = 5):
+    """source_type 単体の予測力。どのニュース源を信用するべきか。"""
+    try:
+        from app.services import material_outcome
+        return clean_for_json(material_outcome.get_source_effectiveness(min_samples=min_samples))
+    except Exception as e:
+        return {"status": "degraded", "items": [], "error": _safe_err(e)}
+
+
 @router.get("/materials-summary")
 def materials_summary(limit_recent: int = 10):
     """material_events のソース別件数 + 最近のサンプル (EDINET / TDnet / RSS 等の効果を可視化)"""

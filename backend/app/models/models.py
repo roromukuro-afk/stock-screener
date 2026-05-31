@@ -967,6 +967,38 @@ class MaterialEvent(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class MaterialOutcome(Base):
+    """各 MaterialEvent が公開後に株価をどう動かしたかを記録 (材料→結果の検証用)"""
+    __tablename__ = "material_outcomes"
+    id = Column(Integer, primary_key=True, index=True)
+    material_event_id = Column(Integer, index=True, unique=True)
+    symbol = Column(String, index=True)
+    market = Column(String)
+    catalyst_category = Column(String, index=True)
+    source_type = Column(String, index=True)
+    source_rank = Column(String)
+    published_at = Column(String, index=True)
+    # 株価スナップショット (公開日基準)
+    event_close = Column(Float)
+    t1_close = Column(Float)
+    t3_close = Column(Float)
+    t5_close = Column(Float)
+    t10_close = Column(Float)
+    t20_close = Column(Float)
+    # 結果メトリクス
+    gain_1d = Column(Float)
+    gain_5d = Column(Float)
+    gain_20d = Column(Float)
+    max_gain_20d = Column(Float)
+    max_drawdown_20d = Column(Float)
+    hit_20_percent_within_20d = Column(Boolean, default=False)
+    hit_10_percent_within_20d = Column(Boolean, default=False)
+    days_to_hit_20 = Column(Integer)
+    # 検証ステータス
+    insufficient_data = Column(Boolean, default=False)
+    computed_at = Column(DateTime, server_default=func.now())
+
+
 class MaterialSourceCache(Base):
     __tablename__ = "material_source_cache"
     id = Column(Integer, primary_key=True, index=True)

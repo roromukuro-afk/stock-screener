@@ -26,6 +26,7 @@ on:
           - test-cron-secret
           - ensure-schema
           - aar-build-from-surge-events
+          - compute-material-outcomes
           - run-daily-jp
           - run-daily-us
           - research-materials-daily
@@ -113,6 +114,13 @@ jobs:
           curl -sS --max-time 120 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
             -w "\nHTTP %{http_code}\n" \
             "$BACKEND_URL/api/automation/ensure-schema"
+
+      - name: Manual - compute-material-outcomes
+        if: github.event_name == 'workflow_dispatch' && inputs.job == 'compute-material-outcomes'
+        run: |
+          curl -sS --max-time 600 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/compute-material-outcomes"
 
       - name: Manual - aar-build-from-surge-events
         if: github.event_name == 'workflow_dispatch' && inputs.job == 'aar-build-from-surge-events'
@@ -232,7 +240,7 @@ jobs:
           echo "HTTP $code"; cat /tmp/r.json || true; echo
           if [ "$code" = "409" ]; then echo "::notice::busy skip"; exit 0; fi
 
-      - name: JST 09:30 surge-20 review + training save (軽量)
+      - name: JST 09:30 surge-20 review + training save + material outcomes (軽量)
         if: github.event_name == 'schedule' && github.event.schedule == '30 0 * * 1-5'
         run: |
           curl -sS --max-time 120 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
@@ -242,6 +250,12 @@ jobs:
           curl -sS --max-time 120 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
             -d '{"trigger_type":"cron"}' -w "\nHTTP %{http_code}\n" \
             "$BACKEND_URL/api/automation/save-surge-20-reviews-as-training" || echo "save skip/busy"
+          sleep 30
+          # 直近60日の MaterialEvent → 株価結果 (T+1/3/5/10/20, max_gain, hit_20) を再計算。
+          # historical_ohlcv キャッシュから読むだけなので軽量。
+          curl -sS --max-time 300 -X POST -H "X-Cron-Secret: $CRON_SECRET" -H "Content-Type: application/json" \
+            -w "\nHTTP %{http_code}\n" \
+            "$BACKEND_URL/api/automation/compute-material-outcomes" || echo "outcomes skip"
 
       - name: Weekend JST 23:00 - training builder
         if: github.event_name == 'schedule' && github.event.schedule == '0 14 * * 0,6'

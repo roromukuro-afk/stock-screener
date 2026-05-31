@@ -297,11 +297,19 @@ def fetch_rss_items(feed_url: str, max_items: int = 50) -> List[Dict]:
 _JP_NEWS_FEEDS = [
     ("reuters_jp_business", "https://feeds.reuters.com/reuters/JPBusinessNews"),
     ("nikkei_top", "https://www.nikkei.com/rss/feed/nxt_feed_top.xml"),
+    # Yahoo Finance JP: ロイター/日経/共同通信を集約
     ("yahoo_finance_jp", "https://news.yahoo.co.jp/rss/categories/business.xml"),
+    ("yahoo_finance_jp_economy", "https://news.yahoo.co.jp/rss/categories/economy.xml"),
+    # 個人投資家向け
+    ("kabutan", "https://kabutan.jp/news/?b=top&category=&page=1.rss"),
+    # IR最速プレスリリース
+    ("prtimes_ir", "https://prtimes.jp/index.rdf"),
 ]
 _US_NEWS_FEEDS = [
     ("reuters_us_business", "https://feeds.reuters.com/reuters/businessNews"),
     ("reuters_marketsnews", "https://feeds.reuters.com/news/wealth"),
+    # SEC EDGAR の RSS (公式)
+    ("sec_filings_8k", "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&output=atom"),
 ]
 
 
