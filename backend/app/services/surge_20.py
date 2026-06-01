@@ -2319,6 +2319,13 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
         if cat_boost > 0:
             positive_sim = max(0.0, min(1.0, positive_sim + cat_boost))
 
+        # USDJPY 感応度 (簡易): risk_off + 円高傾向 (5日 -1% 超) 時は
+        # 直近20日大幅上昇銘柄は売られ易い → 微減点
+        if risk_regime == "risk_off" and (usdjpy_recent_change_5d or 0) < -1.0:
+            pc20 = current.get("t1_price_change_20d") or 0
+            if pc20 > 30:
+                positive_sim = max(0.0, positive_sim - 0.05)
+
         if positive_sim < min_similarity:
             continue
 
