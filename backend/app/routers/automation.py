@@ -222,6 +222,50 @@ def collect_macro_indicators_endpoint(x_cron_secret: Optional[str] = Header(None
         return _degraded_schema_response(e)
 
 
+@router.get("/ai-intelligence-summary")
+def ai_intelligence_summary():
+    """AI が今動作中の状態 (regime / 学習データ / 経験的有効性 / 最近の予測) を1コールで返す。
+    /screener/learning-center 等の Web表示やデバッグ・運用監視用。"""
+    out = {}
+    # 1) マクロ regime
+    try:
+        from app.services import macro_collector
+        out["macro"] = macro_collector.get_latest_snapshot()
+    except Exception as e:
+        out["macro"] = {"error": _safe_err(e)}
+    # 2) 経験的 catalyst 有効性 (カテゴリ別)
+    try:
+        from app.services import material_outcome as _mo
+        out["catalyst_category_performance"] = _mo.get_category_performance(min_samples=3)
+        out["source_effectiveness"] = _mo.get_source_effectiveness(min_samples=3)
+    except Exception as e:
+        out["catalyst_category_performance"] = {"items": [], "error": _safe_err(e)}
+        out["source_effectiveness"] = {"items": [], "error": _safe_err(e)}
+    # 3) 材料件数サマリ
+    try:
+        from app.database import SessionLocal
+        from app.models.models import MaterialEvent, MaterialOutcome, MacroIndicator
+        from sqlalchemy import func as _f
+        db = SessionLocal()
+        try:
+            out["material_event_count"] = db.query(MaterialEvent).count()
+            out["material_outcome_count"] = (db.query(MaterialOutcome)
+                                             .filter(MaterialOutcome.insufficient_data == False).count())
+            out["macro_indicator_count"] = db.query(MacroIndicator).count()
+        finally:
+            db.close()
+    except Exception as e:
+        out["material_event_count"] = None
+        out["material_outcome_count"] = None
+    # 4) surge-20 学習データ + 直近予測
+    try:
+        from app.services import surge_20
+        out["light_status"] = surge_20.get_light_status()
+    except Exception as e:
+        out["light_status"] = {"error": _safe_err(e)}
+    return clean_for_json(out)
+
+
 @router.get("/macro-snapshot")
 def macro_snapshot():
     """マクロ指標の最新値 + リスクオン/オフ判定 (公開)"""
