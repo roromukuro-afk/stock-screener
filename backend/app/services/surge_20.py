@@ -2150,8 +2150,11 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
         dbm = SessionLocal()
         try:
             # 全 MaterialEvent を取得し、symbol を多形式キーで登録 (score高いものを残す)
+            # ※ material_confirmed=True で絞らない: 二次ソース (Yahoo Finance/Reuters 等) も
+            #   catalyst_quality_score (55程度) が高ければ採用する。一次は元から高スコア。
             evs = (dbm.query(MaterialEvent)
                    .filter(MaterialEvent.detected_at >= mcut)
+                   .filter(MaterialEvent.catalyst_quality_score >= 55)  # 最低品質ゲート
                    .order_by(MaterialEvent.catalyst_quality_score.desc().nullslast(),
                              MaterialEvent.detected_at.desc()).all())
             for ev in evs:
