@@ -560,6 +560,7 @@ def candidates_today(market: Optional[str] = None, limit: int = 100):
                 "horizon_distribution": getattr(r, "horizon_distribution", None),
                 "catalyst_boost": getattr(r, "catalyst_boost", None),
                 "prediction_horizon": r.prediction_horizon,
+                "reason_summary": r.reason_summary,
             } for r in rows],
         })
     finally:

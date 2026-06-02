@@ -1141,6 +1141,21 @@ def build_and_save_candidates(market: str = "JP", max_symbols: int = 200,
                            "within_5d": "within_5d", "within_10d": "within_10d",
                            "within_20d": "within_20d", "within_1m": "within_1m"}
             pred_horizon = horizon_map.get(best_h, "within_20d")
+            # 材料の詳細から reason_summary 文字列を構築
+            cdet = c.get("catalyst_detail") or {}
+            cat_part = ""
+            if cdet:
+                cat_label = cdet.get("category") or "材料"
+                cat_score = cdet.get("quality_score")
+                src = cdet.get("source_type") or ""
+                rank = cdet.get("source_rank") or ""
+                title_short = (cdet.get("title") or "")[:60]
+                cat_part = f" | 材料:{cat_label}({src}/{rank}/score={cat_score:.0f})『{title_short}』"
+            reason = (f"pos={c.get('positive_similarity'):.2f} "
+                      f"neg={c.get('negative_similarity'):.2f} "
+                      f"horizon={pred_horizon}"
+                      + cat_part)
+
             payload = {
                 "symbol": c["symbol"],
                 "market": c.get("market") or market,
@@ -1164,7 +1179,7 @@ def build_and_save_candidates(market: str = "JP", max_symbols: int = 200,
                 "similar_past_20_events": c.get("similar_past_20_events"),
                 "horizon_distribution": c.get("horizon_distribution"),
                 "catalyst_boost": c.get("catalyst_boost"),
-                "reason_summary": f"pos={c.get('positive_similarity'):.2f} neg={c.get('negative_similarity'):.2f} horizon={pred_horizon}",
+                "reason_summary": reason,
                 "risk_summary": (c.get("candidate_label") if c.get("candidate_label") in ("上がり切り警戒", "後追い危険", "negative類似高め") else None),
             }
             if existing:
@@ -2102,10 +2117,12 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
         markets=[market], max_count=max_symbols, include_adr=True, offset=start_offset,
     )
 
-    # 材料連動: 直近30日の最高 catalyst_quality_score を銘柄ごとに集計
-    # + カテゴリ別の empirical hit_20率 を MaterialOutcome から学習 (発火時はその率で動的ブースト)
+    # 材料連動: 直近30日の最高 catalyst_quality_score + カテゴリ + 最新タイトル を銘柄ごとに集計
+    # ※ MaterialEvent.symbol は source により "7974"/"7974.T" 形式が混在するため、
+    #   両形式の辞書を保持して候補側 ("7974.T") から確実に引けるようにする
     catalyst_score: Dict[str, float] = {}
     catalyst_category_by_sym: Dict[str, str] = {}
+    catalyst_detail_by_sym: Dict[str, Dict] = {}   # 詳細: title / source / event_id / category
     empirical_hit_rate_by_cat: Dict[str, float] = {}
     try:
         from app.models.models import MaterialEvent, MaterialOutcome
@@ -2113,17 +2130,39 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
         mcut = (date.today() - _td2(days=30)).isoformat()
         dbm = SessionLocal()
         try:
-            rows = (dbm.query(MaterialEvent.symbol,
-                              func.max(MaterialEvent.catalyst_quality_score),
-                              func.max(MaterialEvent.catalyst_category))
-                    .filter(MaterialEvent.detected_at >= mcut)
-                    .filter(MaterialEvent.material_confirmed == True)
-                    .group_by(MaterialEvent.symbol).all())
-            for sym_, sc, cat in rows:
-                if sym_ and sc is not None:
-                    catalyst_score[sym_] = float(sc)
-                    if cat:
-                        catalyst_category_by_sym[sym_] = cat
+            # 全 MaterialEvent を取得し、symbol を多形式キーで登録 (score高いものを残す)
+            evs = (dbm.query(MaterialEvent)
+                   .filter(MaterialEvent.detected_at >= mcut)
+                   .order_by(MaterialEvent.catalyst_quality_score.desc().nullslast(),
+                             MaterialEvent.detected_at.desc()).all())
+            for ev in evs:
+                if not ev.symbol or ev.catalyst_quality_score is None:
+                    continue
+                # symbol を 2形式 (素 / .T 付与) で登録
+                keys = {ev.symbol}
+                if ev.symbol.endswith(".T"):
+                    keys.add(ev.symbol[:-2])
+                else:
+                    keys.add(f"{ev.symbol}.T")
+                if ev.yahoo_symbol:
+                    keys.add(ev.yahoo_symbol)
+                sc = float(ev.catalyst_quality_score)
+                for k in keys:
+                    prev = catalyst_score.get(k)
+                    if prev is None or sc > prev:
+                        catalyst_score[k] = sc
+                        if ev.catalyst_category:
+                            catalyst_category_by_sym[k] = ev.catalyst_category
+                        catalyst_detail_by_sym[k] = {
+                            "material_event_id": ev.id,
+                            "title": (ev.title or "")[:200],
+                            "source_type": ev.source_type,
+                            "source_rank": ev.source_rank,
+                            "category": ev.catalyst_category,
+                            "quality_score": sc,
+                            "published_at": ev.published_at,
+                            "material_confirmed": bool(ev.material_confirmed),
+                        }
             # カテゴリ別 empirical hit率 (insufficient_data=False のサンプルから)
             from sqlalchemy import Integer as _Int
             for cat, n, h20 in (dbm.query(
@@ -2331,6 +2370,11 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
 
         candidate_label = _classify_candidate(positive_sim, negative_sim, current)
 
+        # ヒットした catalyst の詳細 (両 symbol 形式で検索)
+        cat_detail = (catalyst_detail_by_sym.get(sym)
+                      or catalyst_detail_by_sym.get(s.get("symbol", ""))
+                      or catalyst_detail_by_sym.get(s.get("yahoo_symbol", "")))
+
         candidates.append({
             "symbol": sym,
             "name": s.get("name"),
@@ -2344,6 +2388,7 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
             "similar_past_20_events": top5_matches,
             "horizon_distribution": horizon_dist,
             "catalyst_boost": round(cat_boost, 4),
+            "catalyst_detail": cat_detail,  # ★材料の詳細を候補にアタッチ
             "resistance_upside": current.get("t1_resistance_upside"),
             "ma25_deviation": current.get("t1_ma25_deviation"),
             "overextension_score": current.get("t1_overextension_score"),
