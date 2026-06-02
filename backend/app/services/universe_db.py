@@ -183,6 +183,38 @@ def list_eligible_yahoo_symbols(markets: List[str] = None, max_count: int = 0,
         db.close()
 
 
+def get_universe_rows_by_symbols(symbols: List[str], markets: List[str] = None) -> List[Dict]:
+    """指定 symbol リスト (素 or .T 形式) を universe から探す。
+    catalyst を持つ銘柄を優先走査するためのヘルパー。"""
+    if not symbols:
+        return []
+    db: Session = SessionLocal()
+    try:
+        # 素形式と .T 形式を両方検索
+        sym_set = set()
+        for s in symbols:
+            if not s:
+                continue
+            sym_set.add(s)
+            sym_set.add(s[:-2] if s.endswith(".T") else f"{s}.T")
+        q = (db.query(UniverseSymbol)
+             .filter(UniverseSymbol.is_screening_eligible == True)
+             .filter((UniverseSymbol.symbol.in_(sym_set))
+                     | (UniverseSymbol.yahoo_symbol.in_(sym_set))))
+        if markets:
+            q = q.filter(UniverseSymbol.market.in_(markets))
+        return [{
+            "symbol": r.symbol,
+            "yahoo_symbol": r.yahoo_symbol or r.symbol,
+            "name": r.name,
+            "market": r.market,
+            "is_adr": r.is_adr,
+            "currency": r.currency,
+        } for r in q.all()]
+    finally:
+        db.close()
+
+
 def count_eligible_yahoo_symbols(markets: List[str] = None, include_adr: bool = True) -> int:
     """スクリーニング対象として有効な銘柄数 (rolling cursor の折返し判定用)"""
     db: Session = SessionLocal()

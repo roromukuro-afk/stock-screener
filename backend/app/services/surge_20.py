@@ -2117,6 +2117,25 @@ def build_candidates(market: str = "JP", max_symbols: int = 200,
         markets=[market], max_count=max_symbols, include_adr=True, offset=start_offset,
     )
 
+    # ★ catalyst を持つ銘柄は universe 走査ウィンドウの外でも必ず評価する
+    # (rolling cursor が今日その銘柄に当たっていなくても、材料が出ているなら見逃さない)
+    if catalyst_score:
+        already_in = {(s.get("yahoo_symbol") or s.get("symbol")) for s in syms}
+        # catalyst_score の key は素・.T 両形式で入っている → 重複除外
+        cat_keys = list({k for k in catalyst_score.keys() if k and not k.endswith(":")})
+        cat_priority = universe_db.get_universe_rows_by_symbols(
+            symbols=cat_keys, markets=[market],
+        )
+        cat_prepend = []
+        for u in cat_priority:
+            ysym = u.get("yahoo_symbol") or u.get("symbol")
+            if ysym in already_in:
+                continue
+            cat_prepend.append(u)
+            already_in.add(ysym)
+        if cat_prepend:
+            syms = cat_prepend + syms
+
     # 材料連動: 直近30日の最高 catalyst_quality_score + カテゴリ + 最新タイトル を銘柄ごとに集計
     # ※ MaterialEvent.symbol は source により "7974"/"7974.T" 形式が混在するため、
     #   両形式の辞書を保持して候補側 ("7974.T") から確実に引けるようにする
