@@ -1,0 +1,57 @@
+name: research forecast verification
+
+on:
+  schedule:
+    # JST 18:15 weekdays: safely after the JP cash-session close. If a target
+    # exchange has not completed its target-date session yet, the evaluator
+    # simply waits until a completed daily candle becomes available.
+    - cron: "15 9 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      BACKEND_URL: ${{ secrets.BACKEND_URL }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+    steps:
+      - name: Check required secrets
+        run: |
+          if [ -z "$BACKEND_URL" ]; then
+            echo "::error::BACKEND_URL secret is missing"; exit 1
+          fi
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET secret is missing"; exit 1
+          fi
+          echo "Required secrets are configured (values hidden)."
+
+      - name: Wake backend
+        run: |
+          curl -sS --max-time 60 "$BACKEND_URL/api/health" -w "\nHTTP %{http_code}\n" || true
+          sleep 10
+
+      - name: Ensure forecast schema
+        run: |
+          code=$(curl -sS --max-time 120 -o /tmp/schema.json -w "%{http_code}" -X POST \
+            -H "X-Cron-Secret: $CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            "$BACKEND_URL/api/automation/ensure-schema")
+          echo "ensure-schema HTTP $code"
+          head -c 1000 /tmp/schema.json || true
+          echo
+          if [ "$code" -ge 500 ] 2>/dev/null; then
+            echo "::error::ensure-schema failed"; exit 1
+          fi
+
+      - name: Update due research forecasts
+        run: |
+          code=$(curl -sS --max-time 240 -o /tmp/result.json -w "%{http_code}" -X POST \
+            -H "X-Cron-Secret: $CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            "$BACKEND_URL/api/research-forecast/update-due?limit=200")
+          echo "update-due HTTP $code"
+          cat /tmp/result.json || true
+          echo
+          if [ "$code" -ge 400 ] 2>/dev/null; then
+            echo "::error::research forecast verification failed"; exit 1
+          fi
