@@ -2,10 +2,10 @@ name: research forecast verification
 
 on:
   schedule:
-    # JST 09:05 weekdays. JP closes for a just-reached target date are usually
-    # not available yet at this time, so the evaluator waits for the first
-    # trading-day close that is actually present and never substitutes an intraday quote.
-    - cron: "5 0 * * 1-5"
+    # JST 18:15 weekdays: safely after the JP cash-session close. If a target
+    # exchange has not completed its target-date session yet, the evaluator
+    # simply waits until a completed daily candle becomes available.
+    - cron: "15 9 * * 1-5"
   workflow_dispatch:
 
 jobs:
